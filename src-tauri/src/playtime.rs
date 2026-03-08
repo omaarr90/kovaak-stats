@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -8,7 +7,10 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, TimeZone};
 use serde::Deserialize;
 
-use crate::types::{PlaylistPlaytime, PlaytimeSummary, ScenarioPlaytime};
+use crate::types::{
+  DailyPlaylistPlaytime, DailyPlaytime, PlaylistPlaytime, PlaytimeSummary, ScenarioPlaytime,
+};
+
 const STATS_FOLDER_SEGMENTS: [&str; 4] = ["steamapps", "common", "FPSAimTrainer", "FPSAimTrainer"];
 const MAX_ATTEMPT_DURATION_HOURS: i64 = 4;
 
@@ -16,7 +18,30 @@ const MAX_ATTEMPT_DURATION_HOURS: i64 = 4;
 struct AttemptSummary {
   scenario_name: String,
   duration_seconds: i64,
-  ended_at: Option<i64>,
+  ended_at: i64,
+  date_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaylistDefinition {
+  name: String,
+  scenario_names: Vec<String>,
+  total_scenarios: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlaylistAggregate {
+  name: String,
+  total_seconds: i64,
+  matched_scenarios: i64,
+  total_scenarios: i64,
+}
+
+#[derive(Default)]
+struct DailyAccumulator {
+  total_seconds: i64,
+  attempt_count: i64,
+  scenarios: HashMap<String, ScenarioPlaytime>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,11 +61,8 @@ pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
   let entries = fs::read_dir(&stats_dir)
     .map_err(|error| format!("failed to read stats directory {}: {error}", stats_dir.display()))?;
 
-  let mut total_seconds = 0_i64;
-  let mut attempt_count = 0_i64;
+  let mut attempts = Vec::<AttemptSummary>::new();
   let mut skipped_files = 0_i64;
-  let mut last_attempt_at = None;
-  let mut scenarios = HashMap::<String, ScenarioPlaytime>::new();
 
   for entry in entries.flatten() {
     let path = entry.path();
@@ -49,44 +71,26 @@ pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
     }
 
     match parse_attempt_file(&path) {
-      Ok(Some(attempt)) => {
-        total_seconds += attempt.duration_seconds;
-        attempt_count += 1;
-        if attempt.ended_at > last_attempt_at {
-          last_attempt_at = attempt.ended_at;
-        }
-        scenarios
-          .entry(attempt.scenario_name.clone())
-          .and_modify(|scenario| {
-            scenario.total_seconds += attempt.duration_seconds;
-            scenario.attempt_count += 1;
-          })
-          .or_insert(ScenarioPlaytime {
-            name: attempt.scenario_name,
-            total_seconds: attempt.duration_seconds,
-            attempt_count: 1,
-          });
-      }
+      Ok(Some(attempt)) => attempts.push(attempt),
       Ok(None) => skipped_files += 1,
       Err(_) => skipped_files += 1,
     }
   }
 
-  if attempt_count == 0 {
+  if attempts.is_empty() {
     return Err(format!(
       "No parseable KovaaK stats CSV files were found in {}.",
       stats_dir.display()
     ));
   }
 
-  let mut scenarios = scenarios.into_values().collect::<Vec<_>>();
-  scenarios.sort_by(|left, right| {
-    right
-      .total_seconds
-      .cmp(&left.total_seconds)
-      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-  });
-  let playlists = read_playlist_totals(&stats_dir, &scenarios);
+  let playlist_definitions = read_playlist_definitions(&stats_dir);
+  let total_seconds = attempts.iter().map(|attempt| attempt.duration_seconds).sum();
+  let attempt_count = attempts.len() as i64;
+  let last_attempt_at = attempts.iter().map(|attempt| attempt.ended_at).max();
+  let scenarios = summarize_scenarios(&attempts);
+  let playlists = build_overall_playlist_totals(&playlist_definitions, &scenarios);
+  let daily_summaries = summarize_daily_playtime(&attempts, &playlist_definitions);
 
   Ok(PlaytimeSummary {
     total_seconds,
@@ -96,6 +100,7 @@ pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
     source_path: stats_dir.display().to_string(),
     scenarios,
     playlists,
+    daily_summaries,
   })
 }
 
@@ -125,7 +130,144 @@ fn stats_dir_candidates() -> Vec<PathBuf> {
   candidates
 }
 
-fn read_playlist_totals(stats_dir: &Path, scenarios: &[ScenarioPlaytime]) -> Vec<PlaylistPlaytime> {
+fn summarize_scenarios(attempts: &[AttemptSummary]) -> Vec<ScenarioPlaytime> {
+  let mut scenarios = HashMap::<String, ScenarioPlaytime>::new();
+  for attempt in attempts {
+    add_attempt_to_scenarios(&mut scenarios, attempt);
+  }
+  sort_scenarios(scenarios.into_values().collect())
+}
+
+fn summarize_daily_playtime(
+  attempts: &[AttemptSummary],
+  playlist_definitions: &[PlaylistDefinition],
+) -> Vec<DailyPlaytime> {
+  let mut daily = BTreeMap::<String, DailyAccumulator>::new();
+
+  for attempt in attempts {
+    let day = daily.entry(attempt.date_key.clone()).or_default();
+    day.total_seconds += attempt.duration_seconds;
+    day.attempt_count += 1;
+    add_attempt_to_scenarios(&mut day.scenarios, attempt);
+  }
+
+  daily
+    .into_iter()
+    .map(|(date_key, accumulator)| {
+      let scenarios = sort_scenarios(accumulator.scenarios.into_values().collect());
+      let playlists = build_daily_playlist_totals(playlist_definitions, &scenarios);
+      DailyPlaytime {
+        date_key,
+        total_seconds: accumulator.total_seconds,
+        attempt_count: accumulator.attempt_count,
+        playlists,
+        scenarios,
+      }
+    })
+    .collect()
+}
+
+fn add_attempt_to_scenarios(
+  scenarios: &mut HashMap<String, ScenarioPlaytime>,
+  attempt: &AttemptSummary,
+) {
+  scenarios
+    .entry(attempt.scenario_name.clone())
+    .and_modify(|scenario| {
+      scenario.total_seconds += attempt.duration_seconds;
+      scenario.attempt_count += 1;
+    })
+    .or_insert(ScenarioPlaytime {
+      name: attempt.scenario_name.clone(),
+      total_seconds: attempt.duration_seconds,
+      attempt_count: 1,
+    });
+}
+
+fn sort_scenarios(mut scenarios: Vec<ScenarioPlaytime>) -> Vec<ScenarioPlaytime> {
+  scenarios.sort_by(|left, right| {
+    right
+      .total_seconds
+      .cmp(&left.total_seconds)
+      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+  });
+  scenarios
+}
+
+fn build_overall_playlist_totals(
+  playlist_definitions: &[PlaylistDefinition],
+  scenarios: &[ScenarioPlaytime],
+) -> Vec<PlaylistPlaytime> {
+  collect_playlist_aggregates(playlist_definitions, scenarios, true)
+    .into_iter()
+    .map(|playlist| PlaylistPlaytime {
+      name: playlist.name,
+      total_seconds: playlist.total_seconds,
+      matched_scenarios: playlist.matched_scenarios,
+      total_scenarios: playlist.total_scenarios,
+    })
+    .collect()
+}
+
+fn build_daily_playlist_totals(
+  playlist_definitions: &[PlaylistDefinition],
+  scenarios: &[ScenarioPlaytime],
+) -> Vec<DailyPlaylistPlaytime> {
+  collect_playlist_aggregates(playlist_definitions, scenarios, false)
+    .into_iter()
+    .map(|playlist| DailyPlaylistPlaytime {
+      name: playlist.name,
+      total_seconds: playlist.total_seconds,
+      matched_scenarios: playlist.matched_scenarios,
+    })
+    .collect()
+}
+
+fn collect_playlist_aggregates(
+  playlist_definitions: &[PlaylistDefinition],
+  scenarios: &[ScenarioPlaytime],
+  include_empty: bool,
+) -> Vec<PlaylistAggregate> {
+  let scenario_lookup = scenarios
+    .iter()
+    .map(|scenario| (normalize_name(&scenario.name), scenario))
+    .collect::<HashMap<_, _>>();
+  let mut playlists = playlist_definitions
+    .iter()
+    .map(|playlist| {
+      let mut total_seconds = 0_i64;
+      let mut matched_scenarios = 0_i64;
+
+      for scenario_name in &playlist.scenario_names {
+        if let Some(scenario) = scenario_lookup.get(scenario_name) {
+          total_seconds += scenario.total_seconds;
+          matched_scenarios += 1;
+        }
+      }
+
+      PlaylistAggregate {
+        name: playlist.name.clone(),
+        total_seconds,
+        matched_scenarios,
+        total_scenarios: playlist.total_scenarios,
+      }
+    })
+    .collect::<Vec<_>>();
+
+  if !include_empty {
+    playlists.retain(|playlist| playlist.total_seconds > 0);
+  }
+
+  playlists.sort_by(|left, right| {
+    right
+      .total_seconds
+      .cmp(&left.total_seconds)
+      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+  });
+  playlists
+}
+
+fn read_playlist_definitions(stats_dir: &Path) -> Vec<PlaylistDefinition> {
   let Some(playlists_dir) = playlists_dir_from_stats_dir(stats_dir) else {
     return Vec::new();
   };
@@ -134,11 +276,7 @@ fn read_playlist_totals(stats_dir: &Path, scenarios: &[ScenarioPlaytime]) -> Vec
     return Vec::new();
   };
 
-  let scenario_lookup = scenarios
-    .iter()
-    .map(|scenario| (normalize_name(&scenario.name), scenario))
-    .collect::<HashMap<_, _>>();
-  let mut playlists = Vec::<PlaylistPlaytime>::new();
+  let mut playlists = Vec::<PlaylistDefinition>::new();
 
   for entry in entries.flatten() {
     let path = entry.path();
@@ -166,8 +304,6 @@ fn read_playlist_totals(stats_dir: &Path, scenarios: &[ScenarioPlaytime]) -> Vec
 
     let scenario_list = playlist_file.scenario_list.unwrap_or_default();
     let mut unique_names = HashSet::<String>::new();
-    let mut total_seconds = 0_i64;
-    let mut matched_scenarios = 0_i64;
 
     for entry in scenario_list {
       let Some(scenario_name) = entry
@@ -183,27 +319,16 @@ fn read_playlist_totals(stats_dir: &Path, scenarios: &[ScenarioPlaytime]) -> Vec
       if !unique_names.insert(normalized.clone()) {
         continue;
       }
-
-      if let Some(scenario) = scenario_lookup.get(&normalized) {
-        total_seconds += scenario.total_seconds;
-        matched_scenarios += 1;
-      }
     }
 
-    playlists.push(PlaylistPlaytime {
+    let total_scenarios = unique_names.len() as i64;
+    playlists.push(PlaylistDefinition {
       name,
-      total_seconds,
-      matched_scenarios,
-      total_scenarios: unique_names.len() as i64,
+      scenario_names: unique_names.into_iter().collect(),
+      total_scenarios,
     });
   }
 
-  playlists.sort_by(|left, right| {
-    right
-      .total_seconds
-      .cmp(&left.total_seconds)
-      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-  });
   playlists
 }
 
@@ -299,7 +424,8 @@ fn parse_attempt_file(path: &Path) -> Result<Option<AttemptSummary>, String> {
   Ok(Some(AttemptSummary {
     scenario_name,
     duration_seconds: duration.num_seconds(),
-    ended_at: Some(end_at.timestamp()),
+    ended_at: end_at.timestamp(),
+    date_key: end_at.format("%Y-%m-%d").to_string(),
   }))
 }
 
@@ -372,11 +498,10 @@ mod tests {
 
   use chrono::{Local, Timelike};
 
-  use crate::types::ScenarioPlaytime;
-
   use super::{
-    extract_quoted_tokens, parse_attempt_file, playlists_dir_from_stats_dir, read_playlist_totals,
-    steam_library_paths,
+    build_overall_playlist_totals, extract_quoted_tokens, parse_attempt_file,
+    playlists_dir_from_stats_dir, read_playlist_definitions, steam_library_paths,
+    summarize_daily_playtime, summarize_scenarios, AttemptSummary,
   };
 
   #[test]
@@ -395,6 +520,7 @@ mod tests {
       .expect("attempt should exist");
     assert_eq!(attempt.scenario_name, "Test Scenario");
     assert_eq!(attempt.duration_seconds, 59);
+    assert_eq!(attempt.date_key, "2026-03-08");
   }
 
   #[test]
@@ -413,6 +539,24 @@ mod tests {
       .expect("attempt should exist");
     assert_eq!(attempt.scenario_name, "Track Scenario");
     assert_eq!(attempt.duration_seconds, 59);
+  }
+
+  #[test]
+  fn attributes_overnight_attempts_to_the_end_date() {
+    let dir = std::env::temp_dir().join("kovaak-stats-playtime-tests");
+    let _ = fs::create_dir_all(&dir);
+    let file_path = dir.join("Overnight Scenario - Challenge - 2026.03.09-00.05.00 Stats.csv");
+    fs::write(
+      &file_path,
+      "Kill #,Timestamp\n\nChallenge Start:,23:55:00.000\n",
+    )
+    .expect("sample stats file should be written");
+
+    let attempt = parse_attempt_file(&file_path)
+      .expect("file should parse")
+      .expect("attempt should exist");
+    assert_eq!(attempt.duration_seconds, 600);
+    assert_eq!(attempt.date_key, "2026-03-09");
   }
 
   #[test]
@@ -444,7 +588,45 @@ mod tests {
   }
 
   #[test]
-  fn builds_playlist_totals_from_playlist_json() {
+  fn summarizes_daily_playtime_across_dates() {
+    let attempts = vec![
+      AttemptSummary {
+        scenario_name: "Scenario A".to_string(),
+        duration_seconds: 30,
+        ended_at: 1,
+        date_key: "2026-03-08".to_string(),
+      },
+      AttemptSummary {
+        scenario_name: "Scenario A".to_string(),
+        duration_seconds: 45,
+        ended_at: 2,
+        date_key: "2026-03-08".to_string(),
+      },
+      AttemptSummary {
+        scenario_name: "Scenario B".to_string(),
+        duration_seconds: 60,
+        ended_at: 3,
+        date_key: "2026-03-09".to_string(),
+      },
+    ];
+
+    let daily = summarize_daily_playtime(&attempts, &[]);
+
+    assert_eq!(daily.len(), 2);
+    assert_eq!(daily[0].date_key, "2026-03-08");
+    assert_eq!(daily[0].total_seconds, 75);
+    assert_eq!(daily[0].attempt_count, 2);
+    assert_eq!(daily[0].scenarios.len(), 1);
+    assert_eq!(daily[0].scenarios[0].name, "Scenario A");
+    assert_eq!(daily[0].scenarios[0].total_seconds, 75);
+    assert_eq!(daily[0].scenarios[0].attempt_count, 2);
+    assert_eq!(daily[1].date_key, "2026-03-09");
+    assert_eq!(daily[1].total_seconds, 60);
+    assert_eq!(daily[1].attempt_count, 1);
+  }
+
+  #[test]
+  fn daily_playlist_inference_matches_global_playlist_matching() {
     let root = std::env::temp_dir().join("kovaak-stats-playlist-tests");
     let playlists_dir = root.join("Saved").join("SaveGames").join("Playlists");
     let stats_dir = root.join("stats");
@@ -462,26 +644,66 @@ mod tests {
       }"#,
     )
     .expect("playlist json should be written");
+    fs::write(
+      playlists_dir.join("Overlap.json"),
+      r#"{
+        "playlistName": "Overlap Playlist",
+        "scenarioList": [
+          { "scenario_name": "Scenario A" }
+        ]
+      }"#,
+    )
+    .expect("overlap playlist json should be written");
 
-    let scenarios = vec![
-      ScenarioPlaytime {
-        name: "Scenario A".to_string(),
-        total_seconds: 30,
-        attempt_count: 1,
+    let attempts = vec![
+      AttemptSummary {
+        scenario_name: "Scenario A".to_string(),
+        duration_seconds: 30,
+        ended_at: 1,
+        date_key: "2026-03-08".to_string(),
       },
-      ScenarioPlaytime {
-        name: "Scenario B".to_string(),
-        total_seconds: 45,
-        attempt_count: 2,
+      AttemptSummary {
+        scenario_name: "Scenario B".to_string(),
+        duration_seconds: 45,
+        ended_at: 2,
+        date_key: "2026-03-08".to_string(),
       },
     ];
-    let playlists = read_playlist_totals(&stats_dir, &scenarios);
+    let scenarios = summarize_scenarios(&attempts);
+    let definitions = read_playlist_definitions(&stats_dir);
+    let overall = build_overall_playlist_totals(&definitions, &scenarios);
+    let daily = summarize_daily_playtime(&attempts, &definitions);
 
-    assert_eq!(playlists.len(), 1);
-    assert_eq!(playlists[0].name, "Example Playlist");
-    assert_eq!(playlists[0].total_seconds, 75);
-    assert_eq!(playlists[0].matched_scenarios, 2);
-    assert_eq!(playlists[0].total_scenarios, 2);
+    assert_eq!(overall.len(), 2);
+    let example = overall
+      .iter()
+      .find(|playlist| playlist.name == "Example Playlist")
+      .expect("example playlist should exist");
+    assert_eq!(example.total_seconds, 75);
+    assert_eq!(example.matched_scenarios, 2);
+    assert_eq!(example.total_scenarios, 2);
+    let overlap = overall
+      .iter()
+      .find(|playlist| playlist.name == "Overlap Playlist")
+      .expect("overlap playlist should exist");
+    assert_eq!(overlap.total_seconds, 30);
+    assert_eq!(overlap.matched_scenarios, 1);
+
+    assert_eq!(daily.len(), 1);
+    let daily_example = daily[0]
+      .playlists
+      .iter()
+      .find(|playlist| playlist.name == "Example Playlist")
+      .expect("daily example playlist should exist");
+    assert_eq!(daily_example.total_seconds, example.total_seconds);
+    assert_eq!(daily_example.matched_scenarios, example.matched_scenarios);
+    let daily_overlap = daily[0]
+      .playlists
+      .iter()
+      .find(|playlist| playlist.name == "Overlap Playlist")
+      .expect("daily overlap playlist should exist");
+    assert_eq!(daily_overlap.total_seconds, overlap.total_seconds);
+    assert_eq!(daily_overlap.matched_scenarios, overlap.matched_scenarios);
     assert_eq!(playlists_dir_from_stats_dir(&stats_dir), Some(playlists_dir));
   }
 }

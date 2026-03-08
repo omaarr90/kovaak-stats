@@ -19,6 +19,24 @@ pub struct PlaylistPlaytime {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DailyPlaylistPlaytime {
+  pub name: String,
+  pub total_seconds: i64,
+  pub matched_scenarios: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyPlaytime {
+  pub date_key: String,
+  pub total_seconds: i64,
+  pub attempt_count: i64,
+  pub playlists: Vec<DailyPlaylistPlaytime>,
+  pub scenarios: Vec<ScenarioPlaytime>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlaytimeSummary {
   pub total_seconds: i64,
   pub attempt_count: i64,
@@ -27,4 +45,5 @@ pub struct PlaytimeSummary {
   pub source_path: String,
   pub scenarios: Vec<ScenarioPlaytime>,
   pub playlists: Vec<PlaylistPlaytime>,
+  pub daily_summaries: Vec<DailyPlaytime>,
 }
