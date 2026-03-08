@@ -1,46 +1,91 @@
-# KovaaK Stats Desktop App
+# KovaaK Stats
 
-Windows-first Tauri + React desktop app that reads KovaaK `session.sav` data and tracks:
+Windows-first Tauri + React desktop app for reading KovaaK's local files and showing:
 
-- Total active scenario playtime
-- Per-scenario playtime
-- Per-playlist playtime (manual mapping by full scenario path)
+- Total challenge time from KovaaK `stats/*.csv`
+- Per-playlist time from KovaaK playlist JSON files
+- Per-scenario time from KovaaK stats CSV files
+- Search filters for playlists and scenarios
 
-The app starts from zero and records playtime while it is running.
+The app does not use Steam playtime. It reads KovaaK files directly.
 
-## Requirements (Windows)
+## Download
+
+### Option 1: Clone with Git
+
+```powershell
+git clone https://github.com/omaarr90/kovaak-stats.git
+cd kovaak-stats
+```
+
+### Option 2: Download ZIP
+
+1. Open the GitHub repo page.
+2. Click `Code`.
+3. Click `Download ZIP`.
+4. Extract the ZIP.
+5. Open the extracted `kovaak-stats` folder in a terminal.
+
+## Requirements
+
+Install these on Windows before running the app:
 
 - Node.js 20+
-- Rust toolchain (install from [rustup.rs](https://rustup.rs/))
-- Visual Studio Build Tools (MSVC + Windows SDK)
-- WebView2 Runtime (already present on most Windows systems)
+- Rust toolchain from [rustup.rs](https://rustup.rs/)
+- Visual Studio Build Tools with MSVC + Windows SDK
+- WebView2 Runtime
 
-## Install
+## Install Dependencies
 
-```bash
+```powershell
 npm install
 ```
 
-## Run Frontend Only
+## Run The Desktop App
 
-```bash
-npm run dev
-```
-
-## Run Desktop App
-
-```bash
+```powershell
 npm run tauri dev
 ```
 
-## Build Desktop App
+This starts the Tauri desktop app in development mode.
 
-```bash
+## Run The Frontend Only
+
+```powershell
+npm run dev
+```
+
+This only starts the Vite frontend. The desktop features and file parsing come from the Tauri backend.
+
+## Build A Production App
+
+```powershell
 npm run tauri build
 ```
 
+The built desktop app will be created under the Tauri build output folders after the build finishes.
+
+## Useful Dev Commands
+
+```powershell
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+## Where The Data Comes From
+
+The app reads KovaaK files from these locations:
+
+- Challenge stats CSVs:
+  `C:\Program Files (x86)\Steam\steamapps\common\FPSAimTrainer\FPSAimTrainer\stats`
+- Playlist definitions:
+  `C:\Program Files (x86)\Steam\steamapps\common\FPSAimTrainer\FPSAimTrainer\Saved\SaveGames\Playlists`
+
+It also checks Steam library paths from `libraryfolders.vdf`, so KovaaK does not need to be installed only in the default library.
+
 ## Notes
 
-- Default session file path: `%LOCALAPPDATA%\FPSAimTrainer\Saved\SaveGames\session.sav`
-- You can override session path in the app settings.
-- Tray behavior and startup preference are configurable in the settings panel.
+- Total time is calculated from each KovaaK stats CSV using the challenge start time and the timestamp in the filename.
+- Per-playlist time is derived by matching recorded scenario time against the scenarios currently listed in each playlist JSON file.
+- Because KovaaK stats CSV files do not store a historical playlist ID per run, playlist totals are based on current playlist membership rather than an exact historical playlist session log.
+- If the app shows no time, make sure you have completed some KovaaK challenges so CSV files exist in the `stats` folder.
