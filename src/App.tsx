@@ -29,6 +29,41 @@ type DailyPlaytime = {
   scenarios: ScenarioPlaytime[]
 }
 
+type QualityMetricType = 'score' | 'accuracy'
+type TrendStatus = 'improving' | 'flat' | 'declining' | 'insufficientData'
+type CoachRecommendationReason = 'declining' | 'underTrained'
+
+type ScenarioTrend = {
+  scenarioName: string
+  metricType: QualityMetricType
+  personalBest: number
+  avg7d?: number | null
+  avg30d?: number | null
+  deltaPct?: number | null
+  status: TrendStatus
+  runCount7d: number
+  runCount30d: number
+  secondsLast7d: number
+  secondsLast30d: number
+}
+
+type CoachRecommendation = {
+  scenarioName: string
+  minutes: number
+  reason: CoachRecommendationReason
+  note: string
+}
+
+type ProgressCoach = {
+  improvingCount: number
+  flatCount: number
+  decliningCount: number
+  insufficientDataCount: number
+  scenarioTrends: ScenarioTrend[]
+  recommendations: CoachRecommendation[]
+  hasQualityData: boolean
+}
+
 type PlaytimeSummary = {
   totalSeconds: number
   attemptCount: number
@@ -38,6 +73,7 @@ type PlaytimeSummary = {
   scenarios: ScenarioPlaytime[]
   playlists: PlaylistPlaytime[]
   dailySummaries: DailyPlaytime[]
+  progressCoach: ProgressCoach
 }
 
 type CalendarCell =
@@ -143,6 +179,44 @@ function formatTimestamp(timestamp?: number | null): string {
   }
 
   return new Date(timestamp * 1000).toLocaleString()
+}
+
+function formatQualityValue(value?: number | null): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return '--'
+  }
+
+  if (Math.abs(value) >= 1000) {
+    return value.toFixed(0)
+  }
+
+  return value.toFixed(2).replace(/\.00$/, '')
+}
+
+function formatDeltaPercent(value?: number | null): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return '--'
+  }
+
+  const percent = value * 100
+  const sign = percent > 0 ? '+' : ''
+  return `${sign}${percent.toFixed(1)}%`
+}
+
+function formatMetricType(metricType: QualityMetricType): string {
+  return metricType === 'score' ? 'Score' : 'Accuracy'
+}
+
+function formatTrendStatus(status: TrendStatus): string {
+  if (status === 'insufficientData') {
+    return 'Insufficient Data'
+  }
+
+  return status[0].toUpperCase() + status.slice(1)
+}
+
+function formatRecommendationReason(reason: CoachRecommendationReason): string {
+  return reason === 'underTrained' ? 'Under-trained' : 'Declining'
 }
 
 function formatMonthLabel(monthKey: string): string {
@@ -676,6 +750,122 @@ function App() {
               </tbody>
             </table>
           </div>
+        ) : (
+          <span>Loading...</span>
+        )}
+      </section>
+
+      <section className="details coach-card">
+        <div className="detail">
+          <span className="label">Progress Coach</span>
+          <span className="subtle">
+            Quality trends from score and accuracy metrics parsed from KovaaK stats CSV files.
+          </span>
+        </div>
+
+        {summary ? (
+          summary.progressCoach.hasQualityData ? (
+            <>
+              <div className="coach-chip-grid">
+                <div className="coach-chip improving">
+                  <span className="label">Improving</span>
+                  <strong>{summary.progressCoach.improvingCount}</strong>
+                </div>
+                <div className="coach-chip flat">
+                  <span className="label">Flat</span>
+                  <strong>{summary.progressCoach.flatCount}</strong>
+                </div>
+                <div className="coach-chip declining">
+                  <span className="label">Declining</span>
+                  <strong>{summary.progressCoach.decliningCount}</strong>
+                </div>
+                <div className="coach-chip insufficient">
+                  <span className="label">Insufficient Data</span>
+                  <strong>{summary.progressCoach.insufficientDataCount}</strong>
+                </div>
+              </div>
+
+              <div className="coach-grid">
+                <section className="coach-panel">
+                  <div className="detail">
+                    <span className="label">Scenario quality trends</span>
+                  </div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Scenario</th>
+                          <th>Metric</th>
+                          <th>PB</th>
+                          <th>7d Avg</th>
+                          <th>30d Avg</th>
+                          <th>Delta</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.progressCoach.scenarioTrends.map((trend) => (
+                          <tr key={trend.scenarioName}>
+                            <td>{trend.scenarioName}</td>
+                            <td>{formatMetricType(trend.metricType)}</td>
+                            <td>{formatQualityValue(trend.personalBest)}</td>
+                            <td>{formatQualityValue(trend.avg7d)}</td>
+                            <td>{formatQualityValue(trend.avg30d)}</td>
+                            <td>{formatDeltaPercent(trend.deltaPct)}</td>
+                            <td>
+                              <span className={`status-pill ${trend.status}`}>
+                                {formatTrendStatus(trend.status)}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="coach-panel">
+                  <div className="detail">
+                    <span className="label">Today&apos;s 20-minute plan</span>
+                    <span className="subtle">
+                      Four focused blocks of 5 minutes each, prioritized by decline risk and under-training.
+                    </span>
+                  </div>
+
+                  {summary.progressCoach.recommendations.length > 0 ? (
+                    <ol className="coach-plan">
+                      {summary.progressCoach.recommendations.map((recommendation, index) => (
+                        <li key={`${recommendation.scenarioName}-${index}`} className="coach-plan-item">
+                          <div className="coach-plan-head">
+                            <strong>{recommendation.scenarioName}</strong>
+                            <span className="coach-plan-minutes">{recommendation.minutes}m</span>
+                          </div>
+                          <span className="coach-plan-tag">
+                            {formatRecommendationReason(recommendation.reason)}
+                          </span>
+                          <span className="subtle">{recommendation.note}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <div className="empty-day-card">
+                      <strong>No recommendations yet.</strong>
+                      <span className="subtle">
+                        Keep playing scored scenarios to unlock a daily plan.
+                      </span>
+                    </div>
+                  )}
+                </section>
+              </div>
+            </>
+          ) : (
+            <div className="empty-day-card">
+              <strong>No quality metrics parsed yet.</strong>
+              <span className="subtle">
+                Play scored scenarios and refresh. Progress Coach appears once score or accuracy values are found.
+              </span>
+            </div>
+          )
         ) : (
           <span>Loading...</span>
         )}

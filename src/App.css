@@ -240,6 +240,128 @@
   padding-bottom: 0.75rem;
 }
 
+.coach-card {
+  gap: 1rem;
+}
+
+.coach-chip-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.coach-chip {
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  border: 1px solid #1e293b;
+  background: rgba(2, 6, 23, 0.56);
+  display: grid;
+  gap: 0.25rem;
+}
+
+.coach-chip.improving {
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.coach-chip.flat {
+  border-color: rgba(148, 163, 184, 0.45);
+}
+
+.coach-chip.declining {
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+.coach-chip.insufficient {
+  border-color: rgba(249, 115, 22, 0.45);
+}
+
+.coach-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+}
+
+.coach-panel {
+  border: 1px solid #1e293b;
+  border-radius: 20px;
+  background: rgba(2, 6, 23, 0.56);
+  padding: 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #334155;
+  font-size: 0.76rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.status-pill.improving {
+  border-color: rgba(34, 197, 94, 0.55);
+  color: #86efac;
+}
+
+.status-pill.flat {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #cbd5e1;
+}
+
+.status-pill.declining {
+  border-color: rgba(248, 113, 113, 0.55);
+  color: #fca5a5;
+}
+
+.status-pill.insufficientData {
+  border-color: rgba(249, 115, 22, 0.55);
+  color: #fdba74;
+}
+
+.coach-plan {
+  margin: 0;
+  padding-left: 1.15rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.coach-plan-item {
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.55);
+  padding: 0.75rem 0.8rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.coach-plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.coach-plan-minutes {
+  color: #7dd3fc;
+  font-weight: 700;
+}
+
+.coach-plan-tag {
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid #334155;
+  color: #94a3b8;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 .search-input {
   width: 100%;
   border: 1px solid #334155;
@@ -328,8 +450,13 @@ button:disabled {
 
 @media (max-width: 960px) {
   .detail-grid,
-  .day-table-grid {
+  .day-table-grid,
+  .coach-grid {
     grid-template-columns: 1fr;
+  }
+
+  .coach-chip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -385,5 +512,9 @@ button:disabled {
 
   .calendar-month {
     min-width: 0;
+  }
+
+  .coach-chip-grid {
+    grid-template-columns: 1fr;
   }
 }
