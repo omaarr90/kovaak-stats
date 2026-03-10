@@ -1,10 +1,10 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "Windows desktop app for KovaaK file-based playtime stats"
+authors = ["omaarr90"]
+license = "MIT"
+repository = "https://github.com/omaarr90/kovaak-stats"
 edition = "2021"
 rust-version = "1.77.2"
 

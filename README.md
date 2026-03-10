@@ -11,20 +11,18 @@ The app does not use Steam playtime. It reads KovaaK files directly.
 
 ## Download
 
-### Option 1: Clone with Git
+1. Open [GitHub Releases](https://github.com/omaarr90/kovaak-stats/releases).
+2. Download the latest Windows NSIS installer (`.exe`) from the release assets.
+3. Run the installer to install KovaaK Stats.
+
+Because the installer is currently unsigned, Windows SmartScreen may show a warning. Use `More info` then `Run anyway` if you trust the release.
+
+## Build From Source (Development)
 
 ```powershell
 git clone https://github.com/omaarr90/kovaak-stats.git
 cd kovaak-stats
 ```
-
-### Option 2: Download ZIP
-
-1. Open the GitHub repo page.
-2. Click `Code`.
-3. Click `Download ZIP`.
-4. Extract the ZIP.
-5. Open the extracted `kovaak-stats` folder in a terminal.
 
 ## Requirements
 
@@ -64,6 +62,10 @@ npm run tauri build
 ```
 
 The built desktop app will be created under the Tauri build output folders after the build finishes.
+
+## Release Playbook (Maintainers)
+
+See [docs/release-playbook.md](docs/release-playbook.md) for the tag-based GitHub release process.
 
 ## Useful Dev Commands
 
