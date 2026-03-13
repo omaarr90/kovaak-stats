@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import './App.css'
+import { buildBreakdownsViewModel } from './breakdowns-view-model'
 import { createDashboardViewModel } from './dashboard-view-model'
 import {
   clampMonthKey,
@@ -28,6 +29,11 @@ const INITIAL_UI_STATE: UIState = {
   activeView: 'overview',
   playlistQuery: '',
   scenarioQuery: '',
+  scenarioTrendFilter: 'all',
+  scenarioVolumeFilter: 'all',
+  scenarioRecencyFilter: 'all',
+  scenarioSortField: 'totalSeconds',
+  selectedScenarioName: null,
   visibleMonthKey: null,
   selectedDateKey: null,
 }
@@ -44,6 +50,28 @@ function App() {
   const dashboardModel = useMemo(
     () => createDashboardViewModel(summary, uiState.visibleMonthKey, uiState.selectedDateKey),
     [summary, uiState.visibleMonthKey, uiState.selectedDateKey],
+  )
+  const breakdownsModel = useMemo(
+    () =>
+      buildBreakdownsViewModel(summary, {
+        playlistQuery: deferredPlaylistQuery,
+        scenarioQuery: deferredScenarioQuery,
+        trendFilter: uiState.scenarioTrendFilter,
+        volumeFilter: uiState.scenarioVolumeFilter,
+        recencyFilter: uiState.scenarioRecencyFilter,
+        sortField: uiState.scenarioSortField,
+        selectedScenarioName: uiState.selectedScenarioName,
+      }),
+    [
+      deferredPlaylistQuery,
+      deferredScenarioQuery,
+      summary,
+      uiState.scenarioRecencyFilter,
+      uiState.scenarioSortField,
+      uiState.scenarioTrendFilter,
+      uiState.scenarioVolumeFilter,
+      uiState.selectedScenarioName,
+    ],
   )
 
   async function loadPlaytime(showSpinner = true) {
@@ -125,15 +153,6 @@ function App() {
     }))
   }
 
-  const normalizedPlaylistQuery = deferredPlaylistQuery.trim().toLowerCase()
-  const normalizedScenarioQuery = deferredScenarioQuery.trim().toLowerCase()
-  const filteredPlaylists = summary
-    ? summary.playlists.filter((playlist) => playlist.name.toLowerCase().includes(normalizedPlaylistQuery))
-    : []
-  const filteredScenarios = summary
-    ? summary.scenarios.filter((scenario) => scenario.name.toLowerCase().includes(normalizedScenarioQuery))
-    : []
-
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -201,10 +220,22 @@ function App() {
             summary={summary}
             playlistQuery={uiState.playlistQuery}
             scenarioQuery={uiState.scenarioQuery}
-            filteredPlaylists={filteredPlaylists}
-            filteredScenarios={filteredScenarios}
+            scenarioTrendFilter={uiState.scenarioTrendFilter}
+            scenarioVolumeFilter={uiState.scenarioVolumeFilter}
+            scenarioRecencyFilter={uiState.scenarioRecencyFilter}
+            scenarioSortField={uiState.scenarioSortField}
+            filteredPlaylists={breakdownsModel.filteredPlaylists}
+            filteredScenarios={breakdownsModel.visibleScenarios}
+            selectedScenario={breakdownsModel.selectedScenario}
             onPlaylistQueryChange={(next) => setUiState((current) => ({ ...current, playlistQuery: next }))}
             onScenarioQueryChange={(next) => setUiState((current) => ({ ...current, scenarioQuery: next }))}
+            onScenarioTrendFilterChange={(next) => setUiState((current) => ({ ...current, scenarioTrendFilter: next }))}
+            onScenarioVolumeFilterChange={(next) => setUiState((current) => ({ ...current, scenarioVolumeFilter: next }))}
+            onScenarioRecencyFilterChange={(next) =>
+              setUiState((current) => ({ ...current, scenarioRecencyFilter: next }))
+            }
+            onScenarioSortFieldChange={(next) => setUiState((current) => ({ ...current, scenarioSortField: next }))}
+            onSelectScenario={(next) => setUiState((current) => ({ ...current, selectedScenarioName: next }))}
           />
         ) : null}
 

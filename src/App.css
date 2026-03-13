@@ -265,6 +265,39 @@
   color: var(--text-dim);
 }
 
+.filter-grid {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.filter-select {
+  width: 100%;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background: rgba(6, 10, 20, 0.82);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.58rem 0.68rem;
+}
+
+.table-link-button {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.table-link-button.is-active,
+.table-link-button:hover {
+  color: #e0f2fe;
+}
+
 .table-wrap {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
@@ -517,6 +550,74 @@
   letter-spacing: 0.03em;
 }
 
+.coach-plan-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.sparkline-wrap,
+.weekly-strip-wrap {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.sparkline,
+.weekly-strip {
+  width: 100%;
+  height: auto;
+}
+
+.sparkline-bg {
+  fill: rgba(5, 8, 18, 0.72);
+  stroke: rgba(71, 85, 105, 0.58);
+}
+
+.sparkline-point {
+  fill: #7dd3fc;
+  stroke: rgba(3, 7, 18, 0.9);
+  stroke-width: 2;
+}
+
+.sparkline-scale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.highlight-grid {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.highlight-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.highlight-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: rgba(5, 8, 18, 0.6);
+}
+
+.activity-bar {
+  fill: rgba(125, 211, 252, 0.85);
+}
+
+.activity-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-family: var(--font-sans);
+}
+
 .btn {
   border: 1px solid rgba(56, 189, 248, 0.58);
   border-radius: 999px;
@@ -573,6 +674,11 @@ input:focus-visible,
 
   .coach-chip-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .highlight-grid,
+  .filter-grid {
+    grid-template-columns: 1fr;
   }
 }
 

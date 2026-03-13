@@ -30,7 +30,7 @@ const TREND_COLUMNS: DataTableColumn<PlaytimeSummary['progressCoach']['scenarioT
   {
     id: 'scenario',
     header: 'Scenario',
-    width: '32%',
+    width: '28%',
     truncate: true,
     render: (trend) => trend.scenarioName,
     title: (trend) => trend.scenarioName,
@@ -72,7 +72,7 @@ const TREND_COLUMNS: DataTableColumn<PlaytimeSummary['progressCoach']['scenarioT
   {
     id: 'status',
     header: 'Status',
-    width: '16%',
+    width: '20%',
     render: (trend) => <span className={`status-pill ${trend.status}`}>{formatTrendStatus(trend.status)}</span>,
   },
 ]
@@ -104,29 +104,12 @@ function CoachView({ summary }: CoachViewProps) {
     )
   }
 
-  if (!summary.progressCoach.hasQualityData) {
-    return (
-      <div className="view-shell">
-        <PanelCard>
-          <SectionHeader
-            title="Progress Coach"
-            description="Quality trends from score and accuracy values parsed from KovaaK stats CSV files."
-          />
-          <EmptyState
-            title="No quality metrics parsed yet."
-            description="Play scored scenarios and refresh. Progress Coach appears once score or accuracy values are found."
-          />
-        </PanelCard>
-      </div>
-    )
-  }
-
   return (
     <div className="view-shell">
       <PanelCard>
         <SectionHeader
           title="Progress Coach"
-          description="Quality trends from score and accuracy metrics parsed from KovaaK stats CSV files."
+          description="Actionable practice blocks ranked from decline severity, undertraining, and recency."
         />
 
         <div className="chip-grid coach-chip-grid">
@@ -164,33 +147,42 @@ function CoachView({ summary }: CoachViewProps) {
               </div>
             }
           />
-          <DataTable
-            columns={TREND_COLUMNS}
-            rows={filteredTrends}
-            rowKey={(trend) => `${trend.scenarioName}-${trend.metricType}`}
-            emptyMessage="No trends found for the selected filter."
-          />
+          {summary.progressCoach.hasQualityData ? (
+            <DataTable
+              columns={TREND_COLUMNS}
+              rows={filteredTrends}
+              rowKey={(trend) => `${trend.scenarioName}-${trend.metricType}`}
+              emptyMessage="No trends found for the selected filter."
+            />
+          ) : (
+            <EmptyState
+              title="No quality metrics parsed yet."
+              description="Coach recommendations still work from volume and recency, but the trend table needs score or accuracy data."
+            />
+          )}
         </PanelCard>
 
         <PanelCard>
           <SectionHeader
             title="Today's 20-Minute Plan"
-            description="Four focused blocks of 5 minutes each, prioritized by decline risk and under-training."
+            description="Four focused 5-minute blocks ranked by decline severity, undertraining, and staleness."
           />
 
           {summary.progressCoach.recommendations.length > 0 ? (
             <ol className="coach-plan">
-              {summary.progressCoach.recommendations.map((recommendation, index) => (
-                <li key={`${recommendation.scenarioName}-${index}`} className="coach-plan-item">
+              {summary.progressCoach.recommendations.map((recommendation) => (
+                <li key={recommendation.scenarioName} className="coach-plan-item">
                   <div className="coach-plan-head">
                     <strong className="cell-truncate" title={recommendation.scenarioName}>
                       {recommendation.scenarioName}
                     </strong>
                     <span className="coach-plan-minutes">{recommendation.minutes}m</span>
                   </div>
-                  <span className="coach-plan-tag">
-                    {formatRecommendationReason(recommendation.reason)}
-                  </span>
+                  <div className="coach-plan-meta">
+                    <span className="coach-plan-tag">{formatRecommendationReason(recommendation.reason)}</span>
+                    <span className="subtle">Priority {(recommendation.priorityScore * 100).toFixed(0)}%</span>
+                    <span className="subtle">Confidence {(recommendation.confidence * 100).toFixed(0)}%</span>
+                  </div>
                   <span className="subtle">{recommendation.note}</span>
                 </li>
               ))}
@@ -198,7 +190,7 @@ function CoachView({ summary }: CoachViewProps) {
           ) : (
             <EmptyState
               title="No recommendations yet."
-              description="Keep playing scored scenarios to unlock a daily plan."
+              description="Complete some scenarios and refresh to build a ranked practice plan."
             />
           )}
         </PanelCard>

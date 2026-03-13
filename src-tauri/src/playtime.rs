@@ -3,14 +3,17 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, TimeZone};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+use rusqlite::{params, Connection};
 use serde::Deserialize;
 
 use crate::types::{
-  CoachRecommendation, CoachRecommendationReason, DailyPlaylistPlaytime, DailyPlaytime,
-  PlaylistPlaytime, PlaytimeSummary, ProgressCoach, QualityMetricType, ScenarioPlaytime,
-  ScenarioTrend, TrendStatus,
+  CoachReasonStats, CoachRecommendation, CoachRecommendationReason, ConsistencySummary,
+  DailyPlaylistPlaytime, DailyPlaytime, HighlightsSummary, PlaylistPlaytime, PlaytimeSummary,
+  ProgressCoach, QualityMetricType, QualitySample, ScenarioAnalytics, ScenarioPlaytime,
+  ScenarioTrend, TrendHighlight, TrendStatus,
 };
 
 const STATS_FOLDER_SEGMENTS: [&str; 4] = ["steamapps", "common", "FPSAimTrainer", "FPSAimTrainer"];
@@ -19,11 +22,17 @@ const SCORE_PREFIXES: [&str; 3] = ["Score:,", "Challenge Score:,", "Total Score:
 const ACCURACY_PREFIXES: [&str; 3] = ["Accuracy:,", "Hit Accuracy:,", "Acc:,"];
 const TREND_WINDOW_7_DAYS_SECONDS: i64 = 7 * 24 * 60 * 60;
 const TREND_WINDOW_30_DAYS_SECONDS: i64 = 30 * 24 * 60 * 60;
+const TREND_WINDOW_90_DAYS_SECONDS: i64 = 90 * 24 * 60 * 60;
 const TREND_MIN_RUNS_7_DAYS: usize = 3;
 const TREND_MIN_RUNS_30_DAYS: usize = 5;
 const TREND_DELTA_THRESHOLD: f64 = 0.03;
 const COACH_SLOT_MINUTES: i64 = 5;
 const COACH_SLOT_COUNT: usize = 4;
+const HIGHLIGHT_LIMIT: usize = 3;
+const RECENT_QUALITY_SAMPLE_LIMIT: usize = 12;
+const APP_DATA_FOLDER: &str = "com.omaarr90.kovaakstats";
+const CACHE_STATUS_PARSED: &str = "parsed";
+const CACHE_STATUS_SKIPPED: &str = "skipped";
 
 #[derive(Clone, Debug, PartialEq)]
 struct AttemptQuality {
@@ -63,10 +72,26 @@ struct DailyAccumulator {
 }
 
 #[derive(Clone, Debug)]
-struct ScenarioTrendBuild {
+struct ScenarioAnalyticsBuild {
   scenario_key: String,
-  trend: ScenarioTrend,
-  undertrained_ratio: Option<f64>,
+  analytics: ScenarioAnalytics,
+  trend: Option<ScenarioTrend>,
+  recent_personal_best: bool,
+  days_since_last_played: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedFileMetadata {
+  modified_ms: i64,
+  file_size: i64,
+}
+
+#[derive(Clone, Debug)]
+struct StatsFileMetadata {
+  path: PathBuf,
+  cache_key: String,
+  modified_ms: i64,
+  file_size: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,25 +108,16 @@ struct PlaylistScenarioEntry {
 
 pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
   let stats_dir = find_stats_dir()?;
-  let entries = fs::read_dir(&stats_dir)
-    .map_err(|error| format!("failed to read stats directory {}: {error}", stats_dir.display()))?;
+  let cache_path = analytics_cache_path()?;
+  read_kovaak_playtime_from_paths(&stats_dir, &cache_path, Local::now().timestamp())
+}
 
-  let mut attempts = Vec::<AttemptSummary>::new();
-  let mut skipped_files = 0_i64;
-
-  for entry in entries.flatten() {
-    let path = entry.path();
-    if !matches!(path.extension().and_then(|value| value.to_str()), Some("csv")) {
-      continue;
-    }
-
-    match parse_attempt_file(&path) {
-      Ok(Some(attempt)) => attempts.push(attempt),
-      Ok(None) => skipped_files += 1,
-      Err(_) => skipped_files += 1,
-    }
-  }
-
+fn read_kovaak_playtime_from_paths(
+  stats_dir: &Path,
+  cache_path: &Path,
+  now: i64,
+) -> Result<PlaytimeSummary, String> {
+  let (attempts, skipped_files) = sync_cached_attempts(stats_dir, cache_path)?;
   if attempts.is_empty() {
     return Err(format!(
       "No parseable KovaaK stats CSV files were found in {}.",
@@ -109,16 +125,35 @@ pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
     ));
   }
 
-  let playlist_definitions = read_playlist_definitions(&stats_dir);
+  Ok(build_playtime_summary(&attempts, skipped_files, stats_dir, now))
+}
+
+fn analytics_cache_path() -> Result<PathBuf, String> {
+  let root = env::var("LOCALAPPDATA")
+    .map(PathBuf::from)
+    .unwrap_or_else(|_| env::temp_dir());
+  Ok(root.join(APP_DATA_FOLDER).join("analytics.sqlite"))
+}
+
+fn build_playtime_summary(
+  attempts: &[AttemptSummary],
+  skipped_files: i64,
+  stats_dir: &Path,
+  now: i64,
+) -> PlaytimeSummary {
+  let playlist_definitions = read_playlist_definitions(stats_dir);
   let total_seconds = attempts.iter().map(|attempt| attempt.duration_seconds).sum();
   let attempt_count = attempts.len() as i64;
   let last_attempt_at = attempts.iter().map(|attempt| attempt.ended_at).max();
-  let scenarios = summarize_scenarios(&attempts);
-  let playlists = build_overall_playlist_totals(&playlist_definitions, &scenarios);
-  let daily_summaries = summarize_daily_playtime(&attempts, &playlist_definitions);
-  let progress_coach = build_progress_coach(&attempts, Local::now().timestamp());
+  let scenarios = summarize_scenarios(attempts);
+  let daily_summaries = summarize_daily_playtime(attempts, &playlist_definitions);
+  let scenario_analytics = build_scenario_analytics(attempts, now);
+  let consistency = build_consistency(&daily_summaries, now);
+  let highlights = build_highlights(&scenario_analytics);
+  let playlists = build_overall_playlist_totals_from_analytics(&playlist_definitions, &scenario_analytics);
+  let progress_coach = build_progress_coach_from_analytics(&scenario_analytics);
 
-  Ok(PlaytimeSummary {
+  PlaytimeSummary {
     total_seconds,
     attempt_count,
     skipped_files,
@@ -127,8 +162,269 @@ pub fn read_kovaak_playtime() -> Result<PlaytimeSummary, String> {
     scenarios,
     playlists,
     daily_summaries,
+    consistency,
+    highlights,
+    scenario_analytics: scenario_analytics
+      .iter()
+      .map(|scenario| scenario.analytics.clone())
+      .collect(),
     progress_coach,
-  })
+  }
+}
+
+fn sync_cached_attempts(stats_dir: &Path, cache_path: &Path) -> Result<(Vec<AttemptSummary>, i64), String> {
+  let stats_files = collect_stats_files(stats_dir)?;
+  if let Some(parent) = cache_path.parent() {
+    fs::create_dir_all(parent)
+      .map_err(|error| format!("failed to create analytics cache directory {}: {error}", parent.display()))?;
+  }
+
+  let mut conn = Connection::open(cache_path)
+    .map_err(|error| format!("failed to open analytics cache {}: {error}", cache_path.display()))?;
+  conn
+    .execute_batch(
+      r#"
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS analytics_attempts (
+        source_path TEXT PRIMARY KEY,
+        modified_ms INTEGER NOT NULL,
+        file_size INTEGER NOT NULL,
+        parse_status TEXT NOT NULL,
+        scenario_name TEXT,
+        duration_seconds INTEGER,
+        ended_at INTEGER,
+        date_key TEXT,
+        quality_type TEXT,
+        quality_value REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_analytics_attempts_status
+      ON analytics_attempts(parse_status);
+      "#,
+    )
+    .map_err(|error| format!("failed to initialize analytics cache schema: {error}"))?;
+
+  let existing = load_cached_file_metadata(&conn)?;
+  let transaction = conn
+    .transaction()
+    .map_err(|error| format!("failed to open analytics cache transaction: {error}"))?;
+  let mut current_paths = HashSet::<String>::new();
+
+  for file in stats_files {
+    current_paths.insert(file.cache_key.clone());
+    let should_refresh = existing
+      .get(&file.cache_key)
+      .map(|cached| cached.modified_ms != file.modified_ms || cached.file_size != file.file_size)
+      .unwrap_or(true);
+    if !should_refresh {
+      continue;
+    }
+
+    match parse_attempt_file(&file.path) {
+      Ok(Some(attempt)) => {
+        let (quality_type, quality_value) = attempt
+          .quality
+          .as_ref()
+          .map(|quality| (Some(quality_metric_key(quality.metric_type)), Some(quality.value)))
+          .unwrap_or((None, None));
+        transaction
+          .execute(
+            r#"
+            INSERT INTO analytics_attempts(
+              source_path,
+              modified_ms,
+              file_size,
+              parse_status,
+              scenario_name,
+              duration_seconds,
+              ended_at,
+              date_key,
+              quality_type,
+              quality_value
+            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(source_path) DO UPDATE SET
+              modified_ms = excluded.modified_ms,
+              file_size = excluded.file_size,
+              parse_status = excluded.parse_status,
+              scenario_name = excluded.scenario_name,
+              duration_seconds = excluded.duration_seconds,
+              ended_at = excluded.ended_at,
+              date_key = excluded.date_key,
+              quality_type = excluded.quality_type,
+              quality_value = excluded.quality_value
+            "#,
+            params![
+              file.cache_key,
+              file.modified_ms,
+              file.file_size,
+              CACHE_STATUS_PARSED,
+              attempt.scenario_name,
+              attempt.duration_seconds,
+              attempt.ended_at,
+              attempt.date_key,
+              quality_type,
+              quality_value,
+            ],
+          )
+          .map_err(|error| format!("failed to write parsed analytics cache row: {error}"))?;
+      }
+      Ok(None) | Err(_) => {
+        transaction
+          .execute(
+            r#"
+            INSERT INTO analytics_attempts(
+              source_path,
+              modified_ms,
+              file_size,
+              parse_status,
+              scenario_name,
+              duration_seconds,
+              ended_at,
+              date_key,
+              quality_type,
+              quality_value
+            ) VALUES(?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, NULL, NULL)
+            ON CONFLICT(source_path) DO UPDATE SET
+              modified_ms = excluded.modified_ms,
+              file_size = excluded.file_size,
+              parse_status = excluded.parse_status,
+              scenario_name = excluded.scenario_name,
+              duration_seconds = excluded.duration_seconds,
+              ended_at = excluded.ended_at,
+              date_key = excluded.date_key,
+              quality_type = excluded.quality_type,
+              quality_value = excluded.quality_value
+            "#,
+            params![file.cache_key, file.modified_ms, file.file_size, CACHE_STATUS_SKIPPED],
+          )
+          .map_err(|error| format!("failed to write skipped analytics cache row: {error}"))?;
+      }
+    }
+  }
+
+  for stale_path in existing.keys().filter(|path| !current_paths.contains(*path)) {
+    transaction
+      .execute(
+        "DELETE FROM analytics_attempts WHERE source_path = ?1",
+        params![stale_path],
+      )
+      .map_err(|error| format!("failed to delete stale analytics cache row: {error}"))?;
+  }
+
+  transaction
+    .commit()
+    .map_err(|error| format!("failed to commit analytics cache transaction: {error}"))?;
+
+  load_cached_attempts(&conn)
+}
+
+fn collect_stats_files(stats_dir: &Path) -> Result<Vec<StatsFileMetadata>, String> {
+  let entries = fs::read_dir(stats_dir)
+    .map_err(|error| format!("failed to read stats directory {}: {error}", stats_dir.display()))?;
+  let mut stats_files = Vec::<StatsFileMetadata>::new();
+
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if !matches!(path.extension().and_then(|value| value.to_str()), Some("csv")) {
+      continue;
+    }
+
+    let metadata = fs::metadata(&path).ok();
+    let modified_ms = metadata
+      .as_ref()
+      .and_then(|value| value.modified().ok())
+      .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+      .map(|value| value.as_millis() as i64)
+      .unwrap_or(0);
+    let file_size = metadata.map(|value| value.len() as i64).unwrap_or(0);
+    stats_files.push(StatsFileMetadata {
+      cache_key: path.to_string_lossy().to_string(),
+      path,
+      modified_ms,
+      file_size,
+    });
+  }
+
+  stats_files.sort_by(|left, right| left.cache_key.cmp(&right.cache_key));
+  Ok(stats_files)
+}
+
+fn load_cached_file_metadata(conn: &Connection) -> Result<HashMap<String, CachedFileMetadata>, String> {
+  let mut stmt = conn
+    .prepare("SELECT source_path, modified_ms, file_size FROM analytics_attempts")
+    .map_err(|error| format!("failed to prepare analytics cache metadata query: {error}"))?;
+  let rows = stmt
+    .query_map([], |row| {
+      Ok((
+        row.get::<_, String>(0)?,
+        CachedFileMetadata {
+          modified_ms: row.get(1)?,
+          file_size: row.get(2)?,
+        },
+      ))
+    })
+    .map_err(|error| format!("failed to query analytics cache metadata: {error}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| format!("failed to decode analytics cache metadata row: {error}"))?;
+  Ok(rows.into_iter().collect())
+}
+
+fn load_cached_attempts(conn: &Connection) -> Result<(Vec<AttemptSummary>, i64), String> {
+  let mut attempts_stmt = conn
+    .prepare(
+      r#"
+      SELECT scenario_name, duration_seconds, ended_at, date_key, quality_type, quality_value
+      FROM analytics_attempts
+      WHERE parse_status = ?1
+      ORDER BY ended_at ASC, source_path ASC
+      "#,
+    )
+    .map_err(|error| format!("failed to prepare analytics cache attempt query: {error}"))?;
+  let attempts = attempts_stmt
+    .query_map(params![CACHE_STATUS_PARSED], |row| {
+      let quality = match (
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<f64>>(5)?,
+      ) {
+        (Some(metric_type), Some(value)) => quality_metric_from_key(&metric_type).map(|metric_type| AttemptQuality {
+          metric_type,
+          value,
+        }),
+        _ => None,
+      };
+      Ok(AttemptSummary {
+        scenario_name: row.get(0)?,
+        duration_seconds: row.get(1)?,
+        ended_at: row.get(2)?,
+        date_key: row.get(3)?,
+        quality,
+      })
+    })
+    .map_err(|error| format!("failed to query analytics cache attempts: {error}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| format!("failed to decode analytics cache attempt row: {error}"))?;
+  let skipped_files = conn
+    .query_row(
+      "SELECT COUNT(*) FROM analytics_attempts WHERE parse_status = ?1",
+      params![CACHE_STATUS_SKIPPED],
+      |row| row.get::<_, i64>(0),
+    )
+    .map_err(|error| format!("failed to count skipped analytics cache rows: {error}"))?;
+  Ok((attempts, skipped_files))
+}
+
+fn quality_metric_key(metric_type: QualityMetricType) -> &'static str {
+  match metric_type {
+    QualityMetricType::Score => "score",
+    QualityMetricType::Accuracy => "accuracy",
+  }
+}
+
+fn quality_metric_from_key(value: &str) -> Option<QualityMetricType> {
+  match value {
+    "score" => Some(QualityMetricType::Score),
+    "accuracy" => Some(QualityMetricType::Accuracy),
+    _ => None,
+  }
 }
 
 fn find_stats_dir() -> Result<PathBuf, String> {
@@ -194,19 +490,7 @@ fn summarize_daily_playtime(
     .collect()
 }
 
-fn build_progress_coach(attempts: &[AttemptSummary], now: i64) -> ProgressCoach {
-  if attempts.is_empty() {
-    return ProgressCoach {
-      improving_count: 0,
-      flat_count: 0,
-      declining_count: 0,
-      insufficient_data_count: 0,
-      scenario_trends: Vec::new(),
-      recommendations: Vec::new(),
-      has_quality_data: false,
-    };
-  }
-
+fn build_scenario_analytics(attempts: &[AttemptSummary], now: i64) -> Vec<ScenarioAnalyticsBuild> {
   let mut attempts_by_scenario = HashMap::<String, Vec<&AttemptSummary>>::new();
   for attempt in attempts {
     attempts_by_scenario
@@ -215,76 +499,70 @@ fn build_progress_coach(attempts: &[AttemptSummary], now: i64) -> ProgressCoach 
       .push(attempt);
   }
 
-  let mut scenario_trends = attempts_by_scenario
+  let mut scenarios = attempts_by_scenario
     .into_iter()
-    .filter_map(|(scenario_key, scenario_attempts)| {
-      build_scenario_trend(&scenario_key, &scenario_attempts, now)
-    })
+    .map(|(scenario_key, scenario_attempts)| build_scenario_analytics_entry(&scenario_key, &scenario_attempts, now))
     .collect::<Vec<_>>();
-
-  scenario_trends.sort_by(|left, right| {
-    trend_sort_rank(left.trend.status)
-      .cmp(&trend_sort_rank(right.trend.status))
-      .then_with(|| {
-        match (left.trend.delta_pct, right.trend.delta_pct) {
-          (Some(left_delta), Some(right_delta)) => left_delta
-            .partial_cmp(&right_delta)
-            .unwrap_or(std::cmp::Ordering::Equal),
-          (Some(_), None) => std::cmp::Ordering::Less,
-          (None, Some(_)) => std::cmp::Ordering::Greater,
-          (None, None) => std::cmp::Ordering::Equal,
-        }
-      })
+  scenarios.sort_by(|left, right| {
+    right
+      .analytics
+      .total_seconds
+      .cmp(&left.analytics.total_seconds)
       .then_with(|| {
         left
-          .trend
+          .analytics
           .scenario_name
           .to_lowercase()
-          .cmp(&right.trend.scenario_name.to_lowercase())
+          .cmp(&right.analytics.scenario_name.to_lowercase())
       })
   });
-
-  let recommendations = build_daily_recommendations(&scenario_trends);
-  let mut improving_count = 0_i64;
-  let mut flat_count = 0_i64;
-  let mut declining_count = 0_i64;
-  let mut insufficient_data_count = 0_i64;
-
-  for trend in &scenario_trends {
-    match trend.trend.status {
-      TrendStatus::Improving => improving_count += 1,
-      TrendStatus::Flat => flat_count += 1,
-      TrendStatus::Declining => declining_count += 1,
-      TrendStatus::InsufficientData => insufficient_data_count += 1,
-    }
-  }
-
-  let has_quality_data = !scenario_trends.is_empty();
-  ProgressCoach {
-    improving_count,
-    flat_count,
-    declining_count,
-    insufficient_data_count,
-    scenario_trends: scenario_trends
-      .into_iter()
-      .map(|trend_build| trend_build.trend)
-      .collect(),
-    recommendations,
-    has_quality_data,
-  }
+  scenarios
 }
 
-fn build_scenario_trend(
+fn build_scenario_analytics_entry(
   scenario_key: &str,
   scenario_attempts: &[&AttemptSummary],
   now: i64,
-) -> Option<ScenarioTrendBuild> {
-  if scenario_attempts.is_empty() {
-    return None;
-  }
-
+) -> ScenarioAnalyticsBuild {
   let cutoff7 = now - TREND_WINDOW_7_DAYS_SECONDS;
   let cutoff30 = now - TREND_WINDOW_30_DAYS_SECONDS;
+  let cutoff90 = now - TREND_WINDOW_90_DAYS_SECONDS;
+  let total_seconds = scenario_attempts.iter().map(|attempt| attempt.duration_seconds).sum();
+  let attempt_count = scenario_attempts.len() as i64;
+  let last_played_at = scenario_attempts.iter().map(|attempt| attempt.ended_at).max();
+  let seconds_last7d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff7)
+    .map(|attempt| attempt.duration_seconds)
+    .sum();
+  let seconds_last30d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff30)
+    .map(|attempt| attempt.duration_seconds)
+    .sum();
+  let seconds_last90d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff90)
+    .map(|attempt| attempt.duration_seconds)
+    .sum();
+  let attempts_last7d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff7)
+    .count() as i64;
+  let attempts_last30d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff30)
+    .count() as i64;
+  let attempts_last90d = scenario_attempts
+    .iter()
+    .filter(|attempt| attempt.ended_at >= cutoff90)
+    .count() as i64;
+  let scenario_name = scenario_attempts
+    .iter()
+    .max_by_key(|attempt| attempt.ended_at)
+    .map(|attempt| attempt.scenario_name.clone())
+    .unwrap_or_else(|| scenario_key.to_string());
+
   let score_runs_30 = scenario_attempts
     .iter()
     .filter(|attempt| attempt.ended_at >= cutoff30)
@@ -307,85 +585,267 @@ fn build_scenario_trend(
         .unwrap_or(false)
     })
     .count();
-  let Some(metric_type) = select_scenario_metric(score_runs_30, accuracy_runs_30) else {
-    return None;
-  };
+  let metric_type = select_scenario_metric(score_runs_30, accuracy_runs_30);
+  let mut trend = None;
+  let mut trend_status = TrendStatus::InsufficientData;
+  let mut delta_pct = None;
+  let mut personal_best = None;
+  let mut personal_best_at = None;
+  let mut latest_quality_value = None;
+  let mut recent_quality_samples = Vec::<QualitySample>::new();
 
-  let selected_samples = scenario_attempts
-    .iter()
-    .filter_map(|attempt| {
-      let quality = attempt.quality.as_ref()?;
-      if quality.metric_type != metric_type {
-        return None;
-      }
+  if let Some(metric_type) = metric_type {
+    let mut selected_samples = scenario_attempts
+      .iter()
+      .filter_map(|attempt| {
+        let quality = attempt.quality.as_ref()?;
+        if quality.metric_type != metric_type {
+          return None;
+        }
 
-      Some((attempt.ended_at, quality.value))
-    })
-    .collect::<Vec<_>>();
-  if selected_samples.is_empty() {
-    return None;
+        Some((attempt.ended_at, quality.value))
+      })
+      .collect::<Vec<_>>();
+    selected_samples.sort_by_key(|(ended_at, _)| *ended_at);
+
+    if !selected_samples.is_empty() {
+      let personal_best_sample = selected_samples
+        .iter()
+        .copied()
+        .max_by(|left, right| {
+          left
+            .1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+        });
+      personal_best = personal_best_sample.map(|(_, value)| value);
+      personal_best_at = personal_best_sample.map(|(ended_at, _)| ended_at);
+      latest_quality_value = selected_samples.last().map(|(_, value)| *value);
+      recent_quality_samples = selected_samples
+        .iter()
+        .rev()
+        .take(RECENT_QUALITY_SAMPLE_LIMIT)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|(ended_at, value)| QualitySample { ended_at, value })
+        .collect();
+
+      let samples_7d = selected_samples
+        .iter()
+        .filter(|(ended_at, _)| *ended_at >= cutoff7)
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+      let samples_30d = selected_samples
+        .iter()
+        .filter(|(ended_at, _)| *ended_at >= cutoff30)
+        .map(|(_, value)| *value)
+        .collect::<Vec<_>>();
+      let run_count7d = samples_7d.len();
+      let run_count30d = samples_30d.len();
+      let avg7d = average(&samples_7d);
+      let avg30d = average(&samples_30d);
+      delta_pct = match (avg7d, avg30d) {
+        (Some(avg7), Some(avg30)) => Some((avg7 - avg30) / avg30.max(0.0001)),
+        _ => None,
+      };
+      trend_status = classify_trend(run_count7d, run_count30d, delta_pct);
+      trend = Some(ScenarioTrend {
+        scenario_name: scenario_name.clone(),
+        metric_type,
+        personal_best: personal_best.unwrap_or(0.0),
+        avg7d,
+        avg30d,
+        delta_pct,
+        status: trend_status,
+        run_count7d: run_count7d as i64,
+        run_count30d: run_count30d as i64,
+        seconds_last7d,
+        seconds_last30d,
+      });
+    }
   }
 
-  let personal_best = selected_samples
-    .iter()
-    .map(|(_, value)| *value)
-    .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))?;
-  let samples_7d = selected_samples
-    .iter()
-    .filter(|(ended_at, _)| *ended_at >= cutoff7)
-    .map(|(_, value)| *value)
-    .collect::<Vec<_>>();
-  let samples_30d = selected_samples
-    .iter()
-    .filter(|(ended_at, _)| *ended_at >= cutoff30)
-    .map(|(_, value)| *value)
-    .collect::<Vec<_>>();
-  let run_count7d = samples_7d.len();
-  let run_count30d = samples_30d.len();
-  let avg7d = average(&samples_7d);
-  let avg30d = average(&samples_30d);
-  let delta_pct = match (avg7d, avg30d) {
-    (Some(avg7), Some(avg30)) => Some((avg7 - avg30) / avg30.max(0.0001)),
-    _ => None,
-  };
-  let status = classify_trend(run_count7d, run_count30d, delta_pct);
-  let seconds_last7d = scenario_attempts
-    .iter()
-    .filter(|attempt| attempt.ended_at >= cutoff7)
-    .map(|attempt| attempt.duration_seconds)
-    .sum();
-  let seconds_last30d = scenario_attempts
-    .iter()
-    .filter(|attempt| attempt.ended_at >= cutoff30)
-    .map(|attempt| attempt.duration_seconds)
-    .sum();
-  let scenario_name = scenario_attempts
-    .iter()
-    .max_by_key(|attempt| attempt.ended_at)
-    .map(|attempt| attempt.scenario_name.clone())
-    .unwrap_or_else(|| scenario_key.to_string());
+  let days_since_last_played = last_played_at
+    .map(|last_played_at| ((now - last_played_at).max(0)) / (24 * 60 * 60))
+    .unwrap_or(0);
 
-  Some(ScenarioTrendBuild {
+  ScenarioAnalyticsBuild {
     scenario_key: scenario_key.to_string(),
-    trend: ScenarioTrend {
+    analytics: ScenarioAnalytics {
       scenario_name,
       metric_type,
-      personal_best,
-      avg7d,
-      avg30d,
-      delta_pct,
-      status,
-      run_count7d: run_count7d as i64,
-      run_count30d: run_count30d as i64,
+      total_seconds,
+      attempt_count,
+      last_played_at,
       seconds_last7d,
       seconds_last30d,
+      seconds_last90d,
+      attempts_last7d,
+      attempts_last30d,
+      attempts_last90d,
+      trend_status,
+      delta_pct,
+      personal_best,
+      personal_best_at,
+      latest_quality_value,
+      recent_quality_samples,
     },
-    undertrained_ratio: if seconds_last30d > 0 {
-      Some(seconds_last7d as f64 / seconds_last30d as f64)
+    trend,
+    recent_personal_best: personal_best_at
+      .map(|ended_at| ended_at >= cutoff7)
+      .unwrap_or(false),
+    days_since_last_played,
+  }
+}
+
+fn build_consistency(daily_summaries: &[DailyPlaytime], now: i64) -> ConsistencySummary {
+  if daily_summaries.is_empty() {
+    return ConsistencySummary {
+      current_streak_days: 0,
+      longest_streak_days: 0,
+      active_days7d: 0,
+      active_days30d: 0,
+      best_week_seconds: 0,
+    };
+  }
+
+  let mut active_days = daily_summaries
+    .iter()
+    .filter_map(|summary| {
+      NaiveDate::parse_from_str(&summary.date_key, "%Y-%m-%d")
+        .ok()
+        .map(|date| (date, summary.total_seconds))
+    })
+    .collect::<Vec<_>>();
+  active_days.sort_by_key(|(date, _)| *date);
+
+  let today = Local
+    .timestamp_opt(now, 0)
+    .single()
+    .unwrap_or_else(Local::now)
+    .date_naive();
+  let recent7_start = today - Duration::days(6);
+  let recent30_start = today - Duration::days(29);
+  let active_days7d = active_days
+    .iter()
+    .filter(|(date, _)| *date >= recent7_start)
+    .count() as i64;
+  let active_days30d = active_days
+    .iter()
+    .filter(|(date, _)| *date >= recent30_start)
+    .count() as i64;
+
+  let mut longest_streak_days = 0_i64;
+  let mut streak = 0_i64;
+  let mut previous_date = None::<NaiveDate>;
+  for (date, _) in &active_days {
+    streak = if previous_date
+      .map(|previous| *date == previous + Duration::days(1))
+      .unwrap_or(false)
+    {
+      streak + 1
     } else {
-      None
-    },
-  })
+      1
+    };
+    previous_date = Some(*date);
+    longest_streak_days = longest_streak_days.max(streak);
+  }
+
+  let mut current_streak_days = 0_i64;
+  if let Some((last_active_date, _)) = active_days.last() {
+    if *last_active_date >= today - Duration::days(1) {
+      let mut expected_date = *last_active_date;
+      for (date, _) in active_days.iter().rev() {
+        if *date == expected_date {
+          current_streak_days += 1;
+          expected_date -= Duration::days(1);
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  let mut best_week_seconds = 0_i64;
+  let mut rolling_total = 0_i64;
+  let mut window_start = 0_usize;
+  for (date, seconds) in &active_days {
+    rolling_total += *seconds;
+    while active_days[window_start].0 < *date - Duration::days(6) {
+      rolling_total -= active_days[window_start].1;
+      window_start += 1;
+    }
+    best_week_seconds = best_week_seconds.max(rolling_total);
+  }
+
+  ConsistencySummary {
+    current_streak_days,
+    longest_streak_days,
+    active_days7d,
+    active_days30d,
+    best_week_seconds,
+  }
+}
+
+fn build_highlights(scenarios: &[ScenarioAnalyticsBuild]) -> HighlightsSummary {
+  let recent_personal_bests7d = scenarios
+    .iter()
+    .filter(|scenario| scenario.recent_personal_best)
+    .count() as i64;
+  let mut top_improvers = scenarios
+    .iter()
+    .filter_map(|scenario| {
+      let trend = scenario.trend.as_ref()?;
+      let delta_pct = trend.delta_pct?;
+      if trend.status != TrendStatus::Improving {
+        return None;
+      }
+      Some(TrendHighlight {
+        scenario_name: trend.scenario_name.clone(),
+        delta_pct,
+      })
+    })
+    .collect::<Vec<_>>();
+  top_improvers.sort_by(|left, right| {
+    right
+      .delta_pct
+      .partial_cmp(&left.delta_pct)
+      .unwrap_or(std::cmp::Ordering::Equal)
+      .then_with(|| left.scenario_name.to_lowercase().cmp(&right.scenario_name.to_lowercase()))
+  });
+  top_improvers.truncate(HIGHLIGHT_LIMIT);
+
+  let mut top_decliners = scenarios
+    .iter()
+    .filter_map(|scenario| {
+      let trend = scenario.trend.as_ref()?;
+      let delta_pct = trend.delta_pct?;
+      if trend.status != TrendStatus::Declining {
+        return None;
+      }
+      Some(TrendHighlight {
+        scenario_name: trend.scenario_name.clone(),
+        delta_pct,
+      })
+    })
+    .collect::<Vec<_>>();
+  top_decliners.sort_by(|left, right| {
+    left
+      .delta_pct
+      .partial_cmp(&right.delta_pct)
+      .unwrap_or(std::cmp::Ordering::Equal)
+      .then_with(|| left.scenario_name.to_lowercase().cmp(&right.scenario_name.to_lowercase()))
+  });
+  top_decliners.truncate(HIGHLIGHT_LIMIT);
+
+  HighlightsSummary {
+    recent_personal_bests7d,
+    top_improvers,
+    top_decliners,
+  }
 }
 
 fn select_scenario_metric(score_runs_30: usize, accuracy_runs_30: usize) -> Option<QualityMetricType> {
@@ -444,166 +904,157 @@ fn trend_sort_rank(status: TrendStatus) -> i32 {
   }
 }
 
-fn build_daily_recommendations(scenarios: &[ScenarioTrendBuild]) -> Vec<CoachRecommendation> {
-  if scenarios.is_empty() {
-    return Vec::new();
-  }
-
-  let mut declining = scenarios
-    .iter()
-    .filter(|scenario| scenario.trend.status == TrendStatus::Declining)
-    .collect::<Vec<_>>();
-  declining.sort_by(|left, right| {
-    let left_delta = left.trend.delta_pct.unwrap_or(0.0);
-    let right_delta = right.trend.delta_pct.unwrap_or(0.0);
-    left_delta
-      .partial_cmp(&right_delta)
-      .unwrap_or(std::cmp::Ordering::Equal)
-      .then_with(|| {
-        left
-          .trend
-          .scenario_name
-          .to_lowercase()
-          .cmp(&right.trend.scenario_name.to_lowercase())
-      })
-  });
-
-  let mut undertrained = scenarios
-    .iter()
-    .filter(|scenario| scenario.undertrained_ratio.is_some())
-    .collect::<Vec<_>>();
-  undertrained.sort_by(|left, right| {
-    left
-      .undertrained_ratio
-      .unwrap_or(1.0)
-      .partial_cmp(&right.undertrained_ratio.unwrap_or(1.0))
-      .unwrap_or(std::cmp::Ordering::Equal)
-      .then_with(|| {
-        left
-          .trend
-          .scenario_name
-          .to_lowercase()
-          .cmp(&right.trend.scenario_name.to_lowercase())
-      })
-  });
-
-  let mut recommendations = Vec::<CoachRecommendation>::new();
-  let mut selected_keys = HashSet::<String>::new();
-  for candidate in declining.iter().take(2) {
-    push_recommendation(
-      &mut recommendations,
-      &mut selected_keys,
-      candidate,
-      CoachRecommendationReason::Declining,
-      true,
-    );
-  }
-
-  for candidate in &undertrained {
-    if recommendations.len() >= COACH_SLOT_COUNT {
-      break;
-    }
-
-    push_recommendation(
-      &mut recommendations,
-      &mut selected_keys,
-      candidate,
-      CoachRecommendationReason::UnderTrained,
-      true,
-    );
-  }
-
-  for candidate in &declining {
-    if recommendations.len() >= COACH_SLOT_COUNT {
-      break;
-    }
-
-    push_recommendation(
-      &mut recommendations,
-      &mut selected_keys,
-      candidate,
-      CoachRecommendationReason::Declining,
-      true,
-    );
-  }
-
-  for candidate in &undertrained {
-    if recommendations.len() >= COACH_SLOT_COUNT {
-      break;
-    }
-
-    push_recommendation(
-      &mut recommendations,
-      &mut selected_keys,
-      candidate,
-      CoachRecommendationReason::UnderTrained,
-      true,
-    );
-  }
-
-  if recommendations.len() < COACH_SLOT_COUNT {
-    let mut fallback_pool = Vec::<(&ScenarioTrendBuild, CoachRecommendationReason)>::new();
-    fallback_pool.extend(
-      declining
-        .iter()
-        .map(|candidate| (*candidate, CoachRecommendationReason::Declining)),
-    );
-    fallback_pool.extend(
-      undertrained
-        .iter()
-        .map(|candidate| (*candidate, CoachRecommendationReason::UnderTrained)),
-    );
-    if !fallback_pool.is_empty() {
-      let mut index = 0_usize;
-      while recommendations.len() < COACH_SLOT_COUNT {
-        let (candidate, reason) = fallback_pool[index % fallback_pool.len()];
-        push_recommendation(
-          &mut recommendations,
-          &mut selected_keys,
-          candidate,
-          reason,
-          false,
-        );
-        index += 1;
-      }
-    }
-  }
-
-  recommendations
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_progress_coach(attempts: &[AttemptSummary], now: i64) -> ProgressCoach {
+  let scenario_analytics = build_scenario_analytics(attempts, now);
+  build_progress_coach_from_analytics(&scenario_analytics)
 }
 
-fn push_recommendation(
-  recommendations: &mut Vec<CoachRecommendation>,
-  selected_keys: &mut HashSet<String>,
-  candidate: &ScenarioTrendBuild,
-  reason: CoachRecommendationReason,
-  prevent_duplicates: bool,
-) {
-  if prevent_duplicates && !selected_keys.insert(candidate.scenario_key.clone()) {
-    return;
+fn build_progress_coach_from_analytics(scenarios: &[ScenarioAnalyticsBuild]) -> ProgressCoach {
+  let mut scenario_trends = scenarios
+    .iter()
+    .filter_map(|scenario| scenario.trend.clone())
+    .collect::<Vec<_>>();
+  scenario_trends.sort_by(|left, right| {
+    trend_sort_rank(left.status)
+      .cmp(&trend_sort_rank(right.status))
+      .then_with(|| match (left.delta_pct, right.delta_pct) {
+        (Some(left_delta), Some(right_delta)) => left_delta
+          .partial_cmp(&right_delta)
+          .unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+      })
+      .then_with(|| left.scenario_name.to_lowercase().cmp(&right.scenario_name.to_lowercase()))
+  });
+
+  let mut improving_count = 0_i64;
+  let mut flat_count = 0_i64;
+  let mut declining_count = 0_i64;
+  let mut insufficient_data_count = 0_i64;
+  for trend in &scenario_trends {
+    match trend.status {
+      TrendStatus::Improving => improving_count += 1,
+      TrendStatus::Flat => flat_count += 1,
+      TrendStatus::Declining => declining_count += 1,
+      TrendStatus::InsufficientData => insufficient_data_count += 1,
+    }
   }
 
-  let note = match reason {
+  ProgressCoach {
+    improving_count,
+    flat_count,
+    declining_count,
+    insufficient_data_count,
+    recommendations: build_daily_recommendations(scenarios),
+    has_quality_data: !scenario_trends.is_empty(),
+    scenario_trends,
+  }
+}
+
+fn build_daily_recommendations(scenarios: &[ScenarioAnalyticsBuild]) -> Vec<CoachRecommendation> {
+  let mut ranked = scenarios
+    .iter()
+    .map(|scenario| {
+      let decline_severity = clamp_unit(
+        scenario
+          .analytics
+          .delta_pct
+          .map(|delta_pct| delta_pct.min(0.0).abs() / 0.15)
+          .unwrap_or(0.0),
+      );
+      let undertraining_gap = clamp_unit(
+        1.0
+          - ((scenario.analytics.seconds_last7d as f64)
+            / ((scenario.analytics.seconds_last30d as f64 / 4.0).max(1.0)))
+            .min(1.0),
+      );
+      let recency_gap = clamp_unit(scenario.days_since_last_played as f64 / 14.0);
+      let confidence = clamp_unit(scenario.analytics.attempts_last30d as f64 / 10.0);
+      let priority_score =
+        0.45 * decline_severity + 0.25 * undertraining_gap + 0.20 * recency_gap + 0.10 * confidence;
+      let reason = coach_reason_from_components(decline_severity, undertraining_gap, recency_gap);
+      let reason_stats = CoachReasonStats {
+        decline_severity,
+        undertraining_gap,
+        recency_gap,
+        days_since_last_played: scenario.days_since_last_played,
+        delta_pct: scenario.analytics.delta_pct,
+        seconds_last7d: scenario.analytics.seconds_last7d,
+        seconds_last30d: scenario.analytics.seconds_last30d,
+        attempts_last30d: scenario.analytics.attempts_last30d,
+      };
+
+      CoachRecommendation {
+        scenario_name: scenario.analytics.scenario_name.clone(),
+        minutes: COACH_SLOT_MINUTES,
+        reason,
+        note: format_coach_note(scenario, &reason_stats, reason),
+        priority_score,
+        confidence,
+        reason_stats,
+      }
+    })
+    .collect::<Vec<_>>();
+  ranked.sort_by(|left, right| {
+    right
+      .priority_score
+      .partial_cmp(&left.priority_score)
+      .unwrap_or(std::cmp::Ordering::Equal)
+      .then_with(|| right.confidence.partial_cmp(&left.confidence).unwrap_or(std::cmp::Ordering::Equal))
+      .then_with(|| left.scenario_name.to_lowercase().cmp(&right.scenario_name.to_lowercase()))
+  });
+  ranked.truncate(COACH_SLOT_COUNT);
+  ranked
+}
+
+fn format_coach_note(
+  scenario: &ScenarioAnalyticsBuild,
+  reason_stats: &CoachReasonStats,
+  reason: CoachRecommendationReason,
+) -> String {
+  match reason {
     CoachRecommendationReason::Declining => {
-      let avg7d = candidate.trend.avg7d.unwrap_or(0.0);
-      let avg30d = candidate.trend.avg30d.unwrap_or(0.0);
-      let delta_pct = candidate.trend.delta_pct.unwrap_or(0.0) * 100.0;
+      let (avg7d, avg30d) = scenario
+        .trend
+        .as_ref()
+        .map(|trend| (trend.avg7d.unwrap_or(0.0), trend.avg30d.unwrap_or(0.0)))
+        .unwrap_or((0.0, 0.0));
+      let delta_pct = reason_stats.delta_pct.unwrap_or(0.0) * 100.0;
       format!("7d avg {avg7d:.2} vs 30d avg {avg30d:.2} ({delta_pct:+.1}%).")
     }
     CoachRecommendationReason::UnderTrained => {
-      let ratio = candidate.undertrained_ratio.unwrap_or(1.0);
-      let minutes_7d = (candidate.trend.seconds_last7d as f64 / 60.0).round() as i64;
-      let minutes_30d = (candidate.trend.seconds_last30d as f64 / 60.0).round() as i64;
-      format!("7d/30d volume ratio {ratio:.2} ({minutes_7d}m vs {minutes_30d}m).")
+      let weekly_target_minutes = ((scenario.analytics.seconds_last30d as f64 / 4.0) / 60.0).round() as i64;
+      let minutes_7d = (scenario.analytics.seconds_last7d as f64 / 60.0).round() as i64;
+      format!("7d volume {minutes_7d}m against a {weekly_target_minutes}m weekly pace.")
     }
-  };
+    CoachRecommendationReason::Stale => {
+      format!(
+        "Last played {} days ago with {} runs in the last 30 days.",
+        reason_stats.days_since_last_played,
+        scenario.analytics.attempts_last30d,
+      )
+    }
+  }
+}
 
-  recommendations.push(CoachRecommendation {
-    scenario_name: candidate.trend.scenario_name.clone(),
-    minutes: COACH_SLOT_MINUTES,
-    reason,
-    note,
-  });
+fn coach_reason_from_components(
+  decline_severity: f64,
+  undertraining_gap: f64,
+  recency_gap: f64,
+) -> CoachRecommendationReason {
+  if decline_severity >= undertraining_gap && decline_severity >= recency_gap {
+    CoachRecommendationReason::Declining
+  } else if recency_gap >= undertraining_gap {
+    CoachRecommendationReason::Stale
+  } else {
+    CoachRecommendationReason::UnderTrained
+  }
+}
+
+fn clamp_unit(value: f64) -> f64 {
+  value.clamp(0.0, 1.0)
 }
 
 fn add_attempt_to_scenarios(
@@ -633,6 +1084,7 @@ fn sort_scenarios(mut scenarios: Vec<ScenarioPlaytime>) -> Vec<ScenarioPlaytime>
   scenarios
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_overall_playlist_totals(
   playlist_definitions: &[PlaylistDefinition],
   scenarios: &[ScenarioPlaytime],
@@ -644,8 +1096,59 @@ fn build_overall_playlist_totals(
       total_seconds: playlist.total_seconds,
       matched_scenarios: playlist.matched_scenarios,
       total_scenarios: playlist.total_scenarios,
+      last_played_at: None,
+      seconds_last30d: 0,
     })
     .collect()
+}
+
+fn build_overall_playlist_totals_from_analytics(
+  playlist_definitions: &[PlaylistDefinition],
+  scenarios: &[ScenarioAnalyticsBuild],
+) -> Vec<PlaylistPlaytime> {
+  let scenario_lookup = scenarios
+    .iter()
+    .map(|scenario| (scenario.scenario_key.clone(), &scenario.analytics))
+    .collect::<HashMap<_, _>>();
+  let mut playlists = playlist_definitions
+    .iter()
+    .map(|playlist| {
+      let mut total_seconds = 0_i64;
+      let mut matched_scenarios = 0_i64;
+      let mut last_played_at = None::<i64>;
+      let mut seconds_last30d = 0_i64;
+
+      for scenario_name in &playlist.scenario_names {
+        if let Some(scenario) = scenario_lookup.get(scenario_name) {
+          total_seconds += scenario.total_seconds;
+          matched_scenarios += 1;
+          seconds_last30d += scenario.seconds_last30d;
+          last_played_at = match (last_played_at, scenario.last_played_at) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, Some(right)) => Some(right),
+            (Some(left), None) => Some(left),
+            (None, None) => None,
+          };
+        }
+      }
+
+      PlaylistPlaytime {
+        name: playlist.name.clone(),
+        total_seconds,
+        matched_scenarios,
+        total_scenarios: playlist.total_scenarios,
+        last_played_at,
+        seconds_last30d,
+      }
+    })
+    .collect::<Vec<_>>();
+  playlists.sort_by(|left, right| {
+    right
+      .total_seconds
+      .cmp(&left.total_seconds)
+      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+  });
+  playlists
 }
 
 fn build_daily_playlist_totals(
@@ -985,13 +1488,16 @@ fn extract_quoted_tokens(line: &str) -> Vec<String> {
 mod tests {
   use std::fs;
   use std::path::PathBuf;
+  use std::thread;
+  use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
   use chrono::{Local, Timelike};
   use crate::types::{CoachRecommendationReason, QualityMetricType, TrendStatus};
 
   use super::{
-    build_progress_coach, build_overall_playlist_totals, extract_quoted_tokens, parse_attempt_file,
-    playlists_dir_from_stats_dir, read_playlist_definitions, steam_library_paths,
+    build_playtime_summary, build_progress_coach, build_overall_playlist_totals,
+    extract_quoted_tokens, parse_attempt_file, playlists_dir_from_stats_dir,
+    read_kovaak_playtime_from_paths, read_playlist_definitions, steam_library_paths,
     summarize_daily_playtime, summarize_scenarios, AttemptQuality, AttemptSummary,
   };
 
@@ -1009,6 +1515,16 @@ mod tests {
       date_key: date_key.to_string(),
       quality: quality.map(|(metric_type, value)| AttemptQuality { metric_type, value }),
     }
+  }
+
+  fn unique_temp_dir(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system clock should be after unix epoch")
+      .as_nanos();
+    let path = std::env::temp_dir().join(format!("{label}-{unique}"));
+    fs::create_dir_all(&path).expect("temp dir should be created");
+    path
   }
 
   #[test]
@@ -1245,6 +1761,102 @@ mod tests {
     assert_eq!(daily_overlap.total_seconds, overlap.total_seconds);
     assert_eq!(daily_overlap.matched_scenarios, overlap.matched_scenarios);
     assert_eq!(playlists_dir_from_stats_dir(&stats_dir), Some(playlists_dir));
+  }
+
+  #[test]
+  fn analytics_cache_bootstraps_and_refreshes_changed_files() {
+    let root = unique_temp_dir("kovaak-stats-cache-bootstrap");
+    let stats_dir = root.join("stats");
+    fs::create_dir_all(&stats_dir).expect("stats dir should be created");
+    let cache_path = root.join("cache").join("analytics.sqlite");
+    let stats_file = stats_dir.join("Cache Scenario - Challenge - 2026.03.08-20.00.34 Stats.csv");
+
+    fs::write(
+      &stats_file,
+      "Kill #,Timestamp\n\nChallenge Start:,19:59:34.247\nScore:,100\n",
+    )
+    .expect("initial stats file should be written");
+    let first = read_kovaak_playtime_from_paths(&stats_dir, &cache_path, 1_000_000)
+      .expect("initial summary should build");
+    assert_eq!(first.total_seconds, 59);
+    assert_eq!(first.skipped_files, 0);
+
+    thread::sleep(StdDuration::from_millis(20));
+    fs::write(
+      &stats_file,
+      "Kill #,Timestamp\n\nChallenge Start:,19:58:34.000\nScore:,101\n",
+    )
+    .expect("updated stats file should be written");
+    let refreshed = read_kovaak_playtime_from_paths(&stats_dir, &cache_path, 1_000_000)
+      .expect("refreshed summary should build");
+    assert_eq!(refreshed.total_seconds, 120);
+    assert_eq!(refreshed.scenario_analytics[0].latest_quality_value, Some(101.0));
+  }
+
+  #[test]
+  fn analytics_cache_removes_deleted_files_and_preserves_skipped_rows() {
+    let root = unique_temp_dir("kovaak-stats-cache-removal");
+    let stats_dir = root.join("stats");
+    fs::create_dir_all(&stats_dir).expect("stats dir should be created");
+    let cache_path = root.join("cache").join("analytics.sqlite");
+    let first_file = stats_dir.join("One - Challenge - 2026.03.08-20.00.34 Stats.csv");
+    let second_file = stats_dir.join("Two - Challenge - 2026.03.08-20.01.34 Stats.csv");
+    let skipped_file = stats_dir.join("Broken - Challenge - 2026.03.08-20.02.34 Stats.csv");
+
+    fs::write(&first_file, "Kill #,Timestamp\n\nChallenge Start:,19:59:34.247\n")
+      .expect("first stats file should be written");
+    fs::write(&second_file, "Kill #,Timestamp\n\nChallenge Start:,20:00:34.000\n")
+      .expect("second stats file should be written");
+    fs::write(&skipped_file, "Kill #,Timestamp\n\nRandom Key:,Value\n")
+      .expect("broken stats file should be written");
+
+    let initial = read_kovaak_playtime_from_paths(&stats_dir, &cache_path, 1_000_000)
+      .expect("initial summary should build");
+    assert_eq!(initial.attempt_count, 2);
+    assert_eq!(initial.skipped_files, 1);
+
+    fs::remove_file(&first_file).expect("first stats file should be removed");
+    let refreshed = read_kovaak_playtime_from_paths(&stats_dir, &cache_path, 1_000_000)
+      .expect("summary after deletion should build");
+    assert_eq!(refreshed.attempt_count, 1);
+    assert_eq!(refreshed.skipped_files, 1);
+    assert_eq!(refreshed.total_seconds, 60);
+  }
+
+  #[test]
+  fn builds_consistency_and_recent_personal_best_highlights() {
+    let root = unique_temp_dir("kovaak-stats-summary-math");
+    let stats_dir = root.join("stats");
+    fs::create_dir_all(&stats_dir).expect("stats dir should be created");
+    let now = 4_000_000_i64;
+    let day = 24 * 60 * 60;
+    let attempts = vec![
+      attempt("Alpha", 300, now - 2 * day, "1970-02-14", Some((QualityMetricType::Score, 90.0))),
+      attempt("Alpha", 300, now - day, "1970-02-15", Some((QualityMetricType::Score, 95.0))),
+      attempt("Alpha", 300, now, "1970-02-16", Some((QualityMetricType::Score, 100.0))),
+      attempt("Bravo", 180, now, "1970-02-16", Some((QualityMetricType::Score, 110.0))),
+    ];
+
+    let summary = build_playtime_summary(&attempts, 0, &stats_dir, now);
+    assert_eq!(summary.consistency.current_streak_days, 3);
+    assert_eq!(summary.consistency.longest_streak_days, 3);
+    assert_eq!(summary.consistency.active_days7d, 3);
+    assert_eq!(summary.highlights.recent_personal_bests7d, 2);
+  }
+
+  #[test]
+  fn coach_recommendations_fallback_to_stale_without_quality_data() {
+    let now = 5_000_000_i64;
+    let day = 24 * 60 * 60;
+    let attempts = vec![
+      attempt("No Quality A", 300, now - 40 * day, "1970-02-17", None),
+      attempt("No Quality B", 300, now - 10 * day, "1970-03-19", None),
+    ];
+
+    let coach = build_progress_coach(&attempts, now);
+    assert!(!coach.has_quality_data);
+    assert!(!coach.recommendations.is_empty());
+    assert_eq!(coach.recommendations[0].reason, CoachRecommendationReason::Stale);
   }
 
   #[test]

@@ -126,7 +126,13 @@ export function formatTrendStatus(status: TrendStatus): string {
 }
 
 export function formatRecommendationReason(reason: CoachRecommendationReason): string {
-  return reason === 'underTrained' ? 'Under-trained' : 'Declining'
+  if (reason === 'underTrained') {
+    return 'Under-trained'
+  }
+  if (reason === 'stale') {
+    return 'Stale'
+  }
+  return 'Declining'
 }
 
 export function formatMonthLabel(monthKey: string): string {
