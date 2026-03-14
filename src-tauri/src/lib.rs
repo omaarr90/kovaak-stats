@@ -26,6 +26,11 @@ pub fn run() {
       tauri_plugin_autostart::MacosLauncher::LaunchAgent,
       None::<Vec<&str>>,
     ))
+    .setup(|app| {
+      #[cfg(desktop)]
+      app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+      Ok(())
+    })
     .invoke_handler(tauri::generate_handler![get_kovaak_playtime, request_app_quit])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

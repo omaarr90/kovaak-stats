@@ -1,5 +1,6 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
 import './App.css'
 import { buildBreakdownsViewModel } from './breakdowns-view-model'
 import { createDashboardViewModel } from './dashboard-view-model'
@@ -38,12 +39,73 @@ const INITIAL_UI_STATE: UIState = {
   selectedDateKey: null,
 }
 
+type AvailableUpdate = {
+  currentVersion: string
+  version: string
+  date?: string
+  body?: string
+}
+
+type DownloadProgressState = {
+  downloadedBytes: number
+  totalBytes: number | null
+}
+
+const UP_TO_DATE_MESSAGE = 'KovaaK Stats is already up to date.'
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = -1
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+
+  const fractionDigits = value >= 10 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`
+}
+
+function formatDownloadProgress(progress: DownloadProgressState): string {
+  if (progress.totalBytes && progress.totalBytes > 0) {
+    const percent = Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))
+    return `Downloading update... ${percent}% (${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)})`
+  }
+
+  return `Downloading update... ${formatBytes(progress.downloadedBytes)}`
+}
+
+function formatUpdateDate(value?: string): string | null {
+  if (!value) {
+    return null
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return null
+  }
+
+  return parsed.toLocaleString()
+}
+
 function App() {
   const [summary, setSummary] = useState<PlaytimeSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [statusMessage, setStatusMessage] = useState('')
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null)
   const [uiState, setUiState] = useState<UIState>(INITIAL_UI_STATE)
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null)
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null)
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false)
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false)
+  const [updateStatusMessage, setUpdateStatusMessage] = useState('')
+  const [updateStatusTone, setUpdateStatusTone] = useState<'neutral' | 'error'>('neutral')
+  const availableUpdateRef = useRef<Update | null>(null)
 
   const deferredPlaylistQuery = useDeferredValue(uiState.playlistQuery)
   const deferredScenarioQuery = useDeferredValue(uiState.scenarioQuery)
@@ -74,7 +136,7 @@ function App() {
     ],
   )
 
-  async function loadPlaytime(showSpinner = true) {
+  const loadPlaytime = useEffectEvent(async (showSpinner = true) => {
     if (showSpinner) {
       setIsLoading(true)
     }
@@ -91,16 +153,136 @@ function App() {
         setIsLoading(false)
       }
     }
+  })
+
+  function resetAvailableUpdate(nextUpdate: Update | null) {
+    const previousUpdate = availableUpdateRef.current
+    availableUpdateRef.current = nextUpdate
+
+    if (!nextUpdate) {
+      setAvailableUpdate(null)
+      setDownloadProgress(null)
+    } else {
+      setAvailableUpdate({
+        currentVersion: nextUpdate.currentVersion,
+        version: nextUpdate.version,
+        date: nextUpdate.date,
+        body: nextUpdate.body,
+      })
+      setDownloadProgress(null)
+    }
+
+    if (previousUpdate && previousUpdate !== nextUpdate) {
+      void previousUpdate.close().catch(() => {})
+    }
   }
+
+  const runUpdateCheck = useEffectEvent(
+    async ({ showNoUpdateMessage, showErrors }: { showNoUpdateMessage: boolean; showErrors: boolean }) => {
+      if (isCheckingForUpdates || isInstallingUpdate) {
+        return
+      }
+
+      setIsCheckingForUpdates(true)
+      if (showNoUpdateMessage) {
+        setUpdateStatusMessage('')
+        setUpdateStatusTone('neutral')
+      }
+
+      try {
+        const pendingUpdate = await check()
+        if (!pendingUpdate) {
+          resetAvailableUpdate(null)
+          if (showNoUpdateMessage) {
+            setUpdateStatusMessage(UP_TO_DATE_MESSAGE)
+            setUpdateStatusTone('neutral')
+          }
+          return
+        }
+
+        resetAvailableUpdate(pendingUpdate)
+        setUpdateStatusMessage('')
+        setUpdateStatusTone('neutral')
+      } catch (error) {
+        if (showErrors) {
+          setUpdateStatusMessage(`Failed to check for updates: ${String(error)}`)
+          setUpdateStatusTone('error')
+        } else {
+          console.error('Automatic update check failed', error)
+        }
+      } finally {
+        setIsCheckingForUpdates(false)
+      }
+    },
+  )
+
+  const installAvailableUpdate = useEffectEvent(async () => {
+    const pendingUpdate = availableUpdateRef.current
+    if (!pendingUpdate || isInstallingUpdate) {
+      return
+    }
+
+    setIsInstallingUpdate(true)
+    setUpdateStatusMessage('')
+    setUpdateStatusTone('neutral')
+    setDownloadProgress({
+      downloadedBytes: 0,
+      totalBytes: null,
+    })
+
+    try {
+      await pendingUpdate.downloadAndInstall((event: DownloadEvent) => {
+        setDownloadProgress((current) => {
+          if (event.event === 'Started') {
+            return {
+              downloadedBytes: 0,
+              totalBytes: event.data.contentLength ?? null,
+            }
+          }
+
+          if (event.event === 'Progress') {
+            return {
+              downloadedBytes: (current?.downloadedBytes ?? 0) + event.data.chunkLength,
+              totalBytes: current?.totalBytes ?? null,
+            }
+          }
+
+          return current
+        })
+      })
+      resetAvailableUpdate(null)
+      setUpdateStatusMessage('Update downloaded. The Windows installer should launch shortly.')
+      setUpdateStatusTone('neutral')
+    } catch (error) {
+      setUpdateStatusMessage(`Failed to install update: ${String(error)}`)
+      setUpdateStatusTone('error')
+    } finally {
+      setIsInstallingUpdate(false)
+    }
+  })
 
   useEffect(() => {
     void loadPlaytime()
+    void runUpdateCheck({
+      showNoUpdateMessage: false,
+      showErrors: false,
+    })
 
     const timer = window.setInterval(() => {
       void loadPlaytime(false)
     }, 60_000)
 
     return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      const pendingUpdate = availableUpdateRef.current
+      availableUpdateRef.current = null
+      if (pendingUpdate) {
+        void pendingUpdate.close().catch(() => {})
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -124,6 +306,12 @@ function App() {
 
   async function handleQuit() {
     await invoke('request_app_quit')
+  }
+
+  function handleDismissUpdate() {
+    resetAvailableUpdate(null)
+    setUpdateStatusMessage('')
+    setUpdateStatusTone('neutral')
   }
 
   function handleMonthChange(offset: number) {
@@ -167,11 +355,59 @@ function App() {
             <button className="btn" onClick={() => void loadPlaytime()} disabled={isLoading} type="button">
               {isLoading ? 'Refreshing...' : 'Refresh'}
             </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() =>
+                void runUpdateCheck({
+                  showNoUpdateMessage: true,
+                  showErrors: true,
+                })
+              }
+              disabled={isCheckingForUpdates || isInstallingUpdate}
+              type="button"
+            >
+              {isInstallingUpdate ? 'Installing update...' : isCheckingForUpdates ? 'Checking updates...' : 'Check for updates'}
+            </button>
             <button className="btn btn-secondary" onClick={() => void handleQuit()} disabled={isLoading} type="button">
               Quit App
             </button>
           </div>
         </div>
+
+        {availableUpdate ? (
+          <section className="update-banner" aria-live="polite">
+            <div className="update-banner-main">
+              <div>
+                <p className="eyebrow">Update available</p>
+                <h2 className="update-banner-title">Version {availableUpdate.version} is ready to install</h2>
+                <p className="subtle">
+                  Current version {availableUpdate.currentVersion}
+                  {formatUpdateDate(availableUpdate.date) ? ` • Published ${formatUpdateDate(availableUpdate.date)}` : ''}
+                </p>
+              </div>
+
+              <div className="update-banner-actions">
+                <button className="btn" onClick={() => void installAvailableUpdate()} disabled={isInstallingUpdate} type="button">
+                  {isInstallingUpdate ? 'Installing...' : 'Install update'}
+                </button>
+                <button className="btn btn-secondary" onClick={handleDismissUpdate} disabled={isInstallingUpdate} type="button">
+                  Later
+                </button>
+              </div>
+            </div>
+
+            <p className="update-banner-notes">
+              {availableUpdate.body?.trim() || 'A newer KovaaK Stats release is available from GitHub Releases.'}
+            </p>
+
+            {downloadProgress ? <p className="subtle">{formatDownloadProgress(downloadProgress)}</p> : null}
+            {updateStatusMessage ? (
+              <p className={`header-status${updateStatusTone === 'error' ? ' is-error' : ''}`}>{updateStatusMessage}</p>
+            ) : null}
+          </section>
+        ) : updateStatusMessage ? (
+          <p className={`header-status${updateStatusTone === 'error' ? ' is-error' : ''}`}>{updateStatusMessage}</p>
+        ) : null}
 
         <nav className="view-switcher" aria-label="Dashboard sections">
           {VIEW_OPTIONS.map((viewOption) => {

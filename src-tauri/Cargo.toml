@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Windows desktop app for KovaaK file-based playtime stats"
 authors = ["omaarr90"]
 license = "MIT"
@@ -22,8 +22,11 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 log = "0.4"
-tauri = { version = "2.10.3" }
+tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-autostart = "2"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 sysinfo = "0.29.11"
+
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-updater = "2"

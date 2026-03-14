@@ -17,6 +17,8 @@ The app does not use Steam playtime. It reads KovaaK files directly.
 
 Because the installer is currently unsigned, Windows SmartScreen may show a warning. Use `More info` then `Run anyway` if you trust the release.
 
+In-app updates are available starting with the first updater-enabled release. Older installs still need one manual upgrade from GitHub Releases before the app can update itself.
+
 ## Build From Source (Development)
 
 ```powershell
