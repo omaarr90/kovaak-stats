@@ -86,7 +86,7 @@ jobs:
 
       - name: Publish signed GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
