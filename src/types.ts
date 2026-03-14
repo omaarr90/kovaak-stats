@@ -148,6 +148,8 @@ export type CalendarCell =
 
 export type DashboardView = 'overview' | 'calendar' | 'breakdowns' | 'coach'
 
+export type AppDashboardView = 'today' | 'analysis' | 'practice' | 'settings'
+
 export type ScenarioTrendFilter = 'all' | 'improving' | 'flat' | 'declining' | 'insufficientData'
 export type ScenarioVolumeFilter = 'all' | 'active7d' | 'active30d' | 'quiet7d'
 export type ScenarioRecencyFilter = 'all' | 'played7d' | 'played30d' | 'played90d' | 'stale30d'
@@ -160,7 +162,7 @@ export type ScenarioSortField =
   | 'personalBest'
 
 export type UIState = {
-  activeView: DashboardView
+  activeView: AppDashboardView
   playlistQuery: string
   scenarioQuery: string
   scenarioTrendFilter: ScenarioTrendFilter
@@ -170,4 +172,166 @@ export type UIState = {
   selectedScenarioName: string | null
   visibleMonthKey: string | null
   selectedDateKey: string | null
+  activeFocusPreset: FocusPresetId
+  selectedFocusAreaId: string | null
+  planDurationMinutes: PracticeDuration
+  liveMilestonesEnabled: boolean
+  selectedPlaylistId: number | null
+  trackedScenarioQuery: string
+}
+
+export type UserSettings = {
+  sessionPathOverride?: string | null
+  startWithWindows: boolean
+  minimizeToTray: boolean
+  autoCheckUpdates: boolean
+  refreshIntervalSeconds: number
+}
+
+export type UpdateUserSettingsInput = {
+  sessionPathOverride?: string | null
+  startWithWindows?: boolean
+  minimizeToTray?: boolean
+  autoCheckUpdates?: boolean
+  refreshIntervalSeconds?: number
+}
+
+export type ScenarioRef = {
+  scenarioPath: string
+  scenarioName: string
+  totalSeconds: number
+}
+
+export type PlaylistRecord = {
+  id: number
+  name: string
+  scenarioPaths: string[]
+}
+
+export type PlaylistStat = {
+  playlistId?: number | null
+  playlistName: string
+  totalSeconds: number
+}
+
+export type ActiveSession = {
+  isTracking: boolean
+  scenarioPath?: string | null
+  scenarioName?: string | null
+  startedAt?: number | null
+}
+
+export type TrackerDiagnostics = {
+  isKovaakRunning: boolean
+  matchedProcessName?: string | null
+  sessionPath: string
+  sessionFileExists: boolean
+  sessionFileModifiedAt?: number | null
+  lastSnapshotScenarioName?: string | null
+  lastSnapshotScenarioPath?: string | null
+  lastSnapshotPlaylistInProgress?: boolean | null
+  lastError?: string | null
+}
+
+export type StatsOverview = {
+  totalSeconds: number
+  scenarios: ScenarioRef[]
+  playlists: PlaylistStat[]
+  activeSession: ActiveSession
+  diagnostics: TrackerDiagnostics
+}
+
+export type TrainingGoalType = 'weeklyHours' | 'activeDays' | 'scenarioRotation'
+
+export type TrainingGoal = {
+  id: TrainingGoalType
+  label: string
+  unit: string
+  target: number
+}
+
+export type GoalProgress = {
+  id: TrainingGoalType
+  label: string
+  unit: string
+  target: number
+  current: number
+  progress: number
+}
+
+export type FocusPresetId = 'improving' | 'declining' | 'stale' | 'pbHunt'
+
+export type FocusPreset = {
+  id: FocusPresetId
+  label: string
+  description: string
+}
+
+export type FocusArea = {
+  id: string
+  label: string
+  scenarioNames: string[]
+}
+
+export type FocusAreaSummary = {
+  id: string
+  label: string
+  scenarioCount: number
+  secondsLast7d: number
+  secondsLast30d: number
+  neglectedCount: number
+  assignedScenarioNames: string[]
+}
+
+export type PracticeDuration = 20 | 30 | 45
+
+export type TrainingPlanPhase = 'warmup' | 'main' | 'cleanup'
+
+export type TrainingPlanBlock = {
+  phase: TrainingPlanPhase
+  minutes: number
+  scenarioName: string
+  reason: string
+}
+
+export type TrainingPlan = {
+  durationMinutes: PracticeDuration
+  focusAreaId: string | null
+  focusAreaLabel: string | null
+  blocks: TrainingPlanBlock[]
+  summary: string
+}
+
+export type ReadinessSummary = {
+  status: 'underloaded' | 'balanced' | 'overloaded'
+  recentLoadSeconds: number
+  baselineWeeklySeconds: number
+  diversityRatio: number
+  focusAreaCoverage: number
+  narrowTrainingWarning: boolean
+  message: string
+}
+
+export type PersonalBestTimelineEntry = {
+  scenarioName: string
+  personalBest: number
+  personalBestAt: number
+  metricType?: QualityMetricType | null
+}
+
+export type LiveNotification = {
+  id: string
+  title: string
+  body: string
+  tone: 'neutral' | 'improving' | 'declining'
+}
+
+export type SessionRecap = {
+  dateKey: string
+  totalSeconds: number
+  attemptCount: number
+  topScenarioNames: string[]
+  personalBestScenarioNames: string[]
+  decliningScenarioNames: string[]
+  suggestedNextScenarioNames: string[]
 }

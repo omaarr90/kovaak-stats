@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -14,7 +14,10 @@ use crate::types::{
 const SETTINGS_SESSION_PATH_OVERRIDE: &str = "session_path_override";
 const SETTINGS_START_WITH_WINDOWS: &str = "start_with_windows";
 const SETTINGS_MINIMIZE_TO_TRAY: &str = "minimize_to_tray";
+const SETTINGS_AUTO_CHECK_UPDATES: &str = "auto_check_updates";
+const SETTINGS_REFRESH_INTERVAL_SECONDS: &str = "refresh_interval_seconds";
 const UNMAPPED_PLAYLIST_NAME: &str = "Unmapped Playlist";
+const DEFAULT_REFRESH_INTERVAL_SECONDS: i64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct Database {
@@ -33,10 +36,6 @@ pub struct NewSegment {
 impl Database {
   pub fn new(path: PathBuf) -> Self {
     Self { path }
-  }
-
-  pub fn path(&self) -> &Path {
-    &self.path
   }
 
   pub fn init_schema(&self) -> Result<(), String> {
@@ -88,6 +87,11 @@ impl Database {
     self.upsert_setting(SETTINGS_SESSION_PATH_OVERRIDE, "")?;
     self.upsert_setting(SETTINGS_START_WITH_WINDOWS, "1")?;
     self.upsert_setting(SETTINGS_MINIMIZE_TO_TRAY, "1")?;
+    self.upsert_setting(SETTINGS_AUTO_CHECK_UPDATES, "1")?;
+    self.upsert_setting(
+      SETTINGS_REFRESH_INTERVAL_SECONDS,
+      &DEFAULT_REFRESH_INTERVAL_SECONDS.to_string(),
+    )?;
     Ok(())
   }
 
@@ -142,11 +146,24 @@ impl Database {
       .as_deref()
       .map(parse_bool)
       .unwrap_or(true);
+    let auto_check_updates = self
+      .get_setting_from_conn(&conn, SETTINGS_AUTO_CHECK_UPDATES)?
+      .as_deref()
+      .map(parse_bool)
+      .unwrap_or(true);
+    let refresh_interval_seconds = self
+      .get_setting_from_conn(&conn, SETTINGS_REFRESH_INTERVAL_SECONDS)?
+      .as_deref()
+      .and_then(|value| value.parse::<i64>().ok())
+      .map(|value| value.clamp(15, 15 * 60))
+      .unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS);
 
     Ok(AppSettings {
       session_path_override: session_override,
       start_with_windows,
       minimize_to_tray,
+      auto_check_updates,
+      refresh_interval_seconds,
     })
   }
 
@@ -156,6 +173,11 @@ impl Database {
       session_path_override: input.session_path_override.or(current.session_path_override),
       start_with_windows: input.start_with_windows.unwrap_or(current.start_with_windows),
       minimize_to_tray: input.minimize_to_tray.unwrap_or(current.minimize_to_tray),
+      auto_check_updates: input.auto_check_updates.unwrap_or(current.auto_check_updates),
+      refresh_interval_seconds: input
+        .refresh_interval_seconds
+        .unwrap_or(current.refresh_interval_seconds)
+        .clamp(15, 15 * 60),
     };
 
     let override_value = next
@@ -172,6 +194,14 @@ impl Database {
     self.upsert_setting(
       SETTINGS_MINIMIZE_TO_TRAY,
       if next.minimize_to_tray { "1" } else { "0" },
+    )?;
+    self.upsert_setting(
+      SETTINGS_AUTO_CHECK_UPDATES,
+      if next.auto_check_updates { "1" } else { "0" },
+    )?;
+    self.upsert_setting(
+      SETTINGS_REFRESH_INTERVAL_SECONDS,
+      &next.refresh_interval_seconds.to_string(),
     )?;
     self.get_settings()
   }
@@ -299,11 +329,6 @@ impl Database {
       .commit()
       .map_err(|error| format!("failed to commit playlist mapping transaction: {error}"))?;
     Ok(())
-  }
-
-  pub fn resolve_playlist_id_for_scenario(&self, scenario_path: &str) -> Result<Option<i64>, String> {
-    let conn = self.connection()?;
-    Self::resolve_playlist_id_for_scenario_with_conn(&conn, scenario_path)
   }
 
   pub fn insert_segment(&self, segment: NewSegment) -> Result<(), String> {
@@ -684,6 +709,8 @@ mod tests {
         session_path_override: Some("C:\\sessions\\session.sav".to_string()),
         start_with_windows: Some(false),
         minimize_to_tray: Some(false),
+        auto_check_updates: Some(false),
+        refresh_interval_seconds: Some(120),
       })
       .expect("settings should update");
     assert_eq!(
@@ -692,6 +719,8 @@ mod tests {
     );
     assert!(!updated.start_with_windows);
     assert!(!updated.minimize_to_tray);
+    assert!(!updated.auto_check_updates);
+    assert_eq!(updated.refresh_interval_seconds, 120);
   }
 
   #[test]

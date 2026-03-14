@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
+import { listen } from '@tauri-apps/api/event'
 import './App.css'
 import { buildBreakdownsViewModel } from './breakdowns-view-model'
 import { createDashboardViewModel } from './dashboard-view-model'
@@ -13,30 +14,64 @@ import {
   pickMonthSelection,
   shiftMonthKey,
 } from './playtime-utils'
-import { type DashboardView, type PlaytimeSummary, type UIState } from './types'
-import BreakdownsView from './views/BreakdownsView'
-import CalendarView from './views/CalendarView'
-import CoachView from './views/CoachView'
-import OverviewView from './views/OverviewView'
+import {
+  buildGoalProgress,
+  buildFocusAreaSummaries,
+  buildPersonalBestTimeline,
+  buildReadinessSummary,
+  buildSessionRecap,
+  buildTrainingPlan,
+  DEFAULT_TRAINING_GOALS,
+  FOCUS_PRESETS,
+  getPresetFilters,
+  getScenariosForPreset,
+} from './training-insights'
+import {
+  type AppDashboardView,
+  type FocusArea,
+  type LiveNotification,
+  type PlaylistRecord,
+  type PlaytimeSummary,
+  type ScenarioRef,
+  type StatsOverview,
+  type TrainingGoal,
+  type UIState,
+  type UserSettings,
+} from './types'
+import AnalysisView from './views/AnalysisView'
+import PracticeView from './views/PracticeView'
+import SettingsView from './views/SettingsView'
+import TodayView from './views/TodayView'
 
-const VIEW_OPTIONS: { id: DashboardView; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'calendar', label: 'Calendar' },
-  { id: 'breakdowns', label: 'Breakdowns' },
-  { id: 'coach', label: 'Coach' },
+const VIEW_OPTIONS: { id: AppDashboardView; label: string }[] = [
+  { id: 'today', label: 'Today' },
+  { id: 'analysis', label: 'Analysis' },
+  { id: 'practice', label: 'Practice' },
+  { id: 'settings', label: 'Settings' },
 ]
 
+const UI_STORAGE_KEY = 'kovaak-stats-ui-v2'
+const GOALS_STORAGE_KEY = 'kovaak-stats-goals-v1'
+const FOCUS_AREAS_STORAGE_KEY = 'kovaak-stats-focus-areas-v1'
+const LIVE_POLL_INTERVAL_MS = 5_000
+
 const INITIAL_UI_STATE: UIState = {
-  activeView: 'overview',
+  activeView: 'today',
   playlistQuery: '',
   scenarioQuery: '',
-  scenarioTrendFilter: 'all',
+  scenarioTrendFilter: 'declining',
   scenarioVolumeFilter: 'all',
-  scenarioRecencyFilter: 'all',
-  scenarioSortField: 'totalSeconds',
+  scenarioRecencyFilter: 'played30d',
+  scenarioSortField: 'deltaPct',
   selectedScenarioName: null,
   visibleMonthKey: null,
   selectedDateKey: null,
+  activeFocusPreset: 'declining',
+  selectedFocusAreaId: null,
+  planDurationMinutes: 20,
+  liveMilestonesEnabled: true,
+  selectedPlaylistId: null,
+  trackedScenarioQuery: '',
 }
 
 type AvailableUpdate = {
@@ -52,6 +87,54 @@ type DownloadProgressState = {
 }
 
 const UP_TO_DATE_MESSAGE = 'KovaaK Stats is already up to date.'
+
+function readStoredUiState(): UIState {
+  try {
+    const raw = window.localStorage.getItem(UI_STORAGE_KEY)
+    if (!raw) {
+      return INITIAL_UI_STATE
+    }
+
+    const parsed = JSON.parse(raw) as Partial<UIState>
+    return {
+      ...INITIAL_UI_STATE,
+      ...parsed,
+    }
+  } catch {
+    return INITIAL_UI_STATE
+  }
+}
+
+function readStoredGoals(): TrainingGoal[] {
+  try {
+    const raw = window.localStorage.getItem(GOALS_STORAGE_KEY)
+    if (!raw) {
+      return DEFAULT_TRAINING_GOALS
+    }
+
+    const parsed = JSON.parse(raw) as TrainingGoal[]
+    return DEFAULT_TRAINING_GOALS.map((goal) => {
+      const stored = parsed.find((candidate) => candidate.id === goal.id)
+      return stored ? { ...goal, ...stored } : goal
+    })
+  } catch {
+    return DEFAULT_TRAINING_GOALS
+  }
+}
+
+function readStoredFocusAreas(): FocusArea[] {
+  try {
+    const raw = window.localStorage.getItem(FOCUS_AREAS_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+
+    const parsed = JSON.parse(raw) as FocusArea[]
+    return parsed.filter((focusArea) => focusArea.id && focusArea.label)
+  } catch {
+    return []
+  }
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
@@ -95,10 +178,20 @@ function formatUpdateDate(value?: string): string | null {
 
 function App() {
   const [summary, setSummary] = useState<PlaytimeSummary | null>(null)
+  const [trackedOverview, setTrackedOverview] = useState<StatsOverview | null>(null)
+  const [playlistRecords, setPlaylistRecords] = useState<PlaylistRecord[]>([])
+  const [trackedScenarios, setTrackedScenarios] = useState<ScenarioRef[]>([])
+  const [settings, setSettings] = useState<UserSettings | null>(null)
+  const [settingsDraft, setSettingsDraft] = useState<UserSettings | null>(null)
+  const [goals, setGoals] = useState<TrainingGoal[]>(readStoredGoals)
+  const [focusAreas, setFocusAreas] = useState<FocusArea[]>(readStoredFocusAreas)
+  const [liveNotifications, setLiveNotifications] = useState<LiveNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [statusMessage, setStatusMessage] = useState('')
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null)
-  const [uiState, setUiState] = useState<UIState>(INITIAL_UI_STATE)
+  const [settingsSaveMessage, setSettingsSaveMessage] = useState('')
+  const [isSavingSettings, setIsSavingSettings] = useState(false)
+  const [uiState, setUiState] = useState<UIState>(readStoredUiState)
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null)
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressState | null>(null)
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false)
@@ -106,6 +199,16 @@ function App() {
   const [updateStatusMessage, setUpdateStatusMessage] = useState('')
   const [updateStatusTone, setUpdateStatusTone] = useState<'neutral' | 'error'>('neutral')
   const availableUpdateRef = useRef<Update | null>(null)
+  const hasAutoCheckedRef = useRef(false)
+  const liveMilestoneRef = useRef<{
+    sessionKey: string | null
+    thresholds: Set<number>
+    pbWatchScenario: string | null
+  }>({
+    sessionKey: null,
+    thresholds: new Set<number>(),
+    pbWatchScenario: null,
+  })
 
   const deferredPlaylistQuery = useDeferredValue(uiState.playlistQuery)
   const deferredScenarioQuery = useDeferredValue(uiState.scenarioQuery)
@@ -135,6 +238,51 @@ function App() {
       uiState.selectedScenarioName,
     ],
   )
+  const presetScenarios = useMemo(
+    () => getScenariosForPreset(summary, uiState.activeFocusPreset),
+    [summary, uiState.activeFocusPreset],
+  )
+  const goalProgress = useMemo(() => buildGoalProgress(summary, goals), [summary, goals])
+  const focusAreaSummaries = useMemo(() => buildFocusAreaSummaries(summary, focusAreas), [summary, focusAreas])
+  const readinessSummary = useMemo(
+    () => buildReadinessSummary(summary, focusAreaSummaries),
+    [summary, focusAreaSummaries],
+  )
+  const personalBestTimeline = useMemo(() => buildPersonalBestTimeline(summary), [summary])
+  const trainingPlan = useMemo(
+    () =>
+      buildTrainingPlan(
+        summary,
+        focusAreas,
+        uiState.activeFocusPreset,
+        uiState.selectedFocusAreaId,
+        uiState.planDurationMinutes,
+      ),
+    [focusAreas, summary, uiState.activeFocusPreset, uiState.planDurationMinutes, uiState.selectedFocusAreaId],
+  )
+  const sessionRecap = useMemo(
+    () => buildSessionRecap(summary, dashboardModel.selectedDay.dateKey),
+    [dashboardModel.selectedDay.dateKey, summary],
+  )
+
+  const pushLiveNotification = useEffectEvent((notification: Omit<LiveNotification, 'id'>) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const nextNotification: LiveNotification = {
+      id,
+      ...notification,
+    }
+
+    setLiveNotifications((current) => [...current.slice(-3), nextNotification])
+    window.setTimeout(() => {
+      setLiveNotifications((current) => current.filter((item) => item.id !== id))
+    }, 6_000)
+
+    if (uiState.liveMilestonesEnabled && 'Notification' in window) {
+      if (window.Notification.permission === 'granted') {
+        void Promise.resolve().then(() => new window.Notification(notification.title, { body: notification.body }))
+      }
+    }
+  })
 
   const loadPlaytime = useEffectEvent(async (showSpinner = true) => {
     if (showSpinner) {
@@ -147,12 +295,49 @@ function App() {
       setStatusMessage('')
       setLastRefreshAt(Date.now())
     } catch (error) {
+      if (!summary) {
+        setSummary(null)
+      }
       setStatusMessage(`Failed to read KovaaK playtime: ${String(error)}`)
     } finally {
       if (showSpinner) {
         setIsLoading(false)
       }
     }
+  })
+
+  const loadSettings = useEffectEvent(async () => {
+    try {
+      const nextSettings = await invoke<UserSettings>('get_app_settings')
+      setSettings(nextSettings)
+      setSettingsDraft(nextSettings)
+    } catch (error) {
+      setSettingsSaveMessage(`Failed to load settings: ${String(error)}`)
+    }
+  })
+
+  const loadTrackingWorkspace = useEffectEvent(async () => {
+    try {
+      const [nextOverview, nextPlaylists, nextTrackedScenarios] = await Promise.all([
+        invoke<StatsOverview>('get_tracked_stats_overview'),
+        invoke<PlaylistRecord[]>('get_playlist_records'),
+        invoke<ScenarioRef[]>('get_tracking_scenarios'),
+      ])
+      setTrackedOverview(nextOverview)
+      setPlaylistRecords(nextPlaylists)
+      setTrackedScenarios(nextTrackedScenarios)
+      setUiState((current) => ({
+        ...current,
+        selectedPlaylistId:
+          current.selectedPlaylistId ?? nextPlaylists[0]?.id ?? null,
+      }))
+    } catch (error) {
+      console.error('Failed to load tracking workspace', error)
+    }
+  })
+
+  const refreshWorkspace = useEffectEvent(async (showSpinner = true) => {
+    await Promise.all([loadPlaytime(showSpinner), loadTrackingWorkspace(), loadSettings()])
   })
 
   function resetAvailableUpdate(nextUpdate: Update | null) {
@@ -262,20 +447,20 @@ function App() {
   })
 
   useEffect(() => {
-    void loadPlaytime()
-    void runUpdateCheck({
-      showNoUpdateMessage: false,
-      showErrors: false,
-    })
-
-    const timer = window.setInterval(() => {
-      void loadPlaytime(false)
-    }, 60_000)
-
-    return () => window.clearInterval(timer)
-  }, [])
+    window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(uiState))
+  }, [uiState])
 
   useEffect(() => {
+    window.localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals))
+  }, [goals])
+
+  useEffect(() => {
+    window.localStorage.setItem(FOCUS_AREAS_STORAGE_KEY, JSON.stringify(focusAreas))
+  }, [focusAreas])
+
+  useEffect(() => {
+    void refreshWorkspace()
+
     return () => {
       const pendingUpdate = availableUpdateRef.current
       availableUpdateRef.current = null
@@ -284,6 +469,117 @@ function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!settings?.autoCheckUpdates || hasAutoCheckedRef.current) {
+      return
+    }
+
+    hasAutoCheckedRef.current = true
+    void runUpdateCheck({
+      showNoUpdateMessage: false,
+      showErrors: false,
+    })
+  }, [runUpdateCheck, settings?.autoCheckUpdates])
+
+  useEffect(() => {
+    if (!settings) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      void loadPlaytime(false)
+    }, settings.refreshIntervalSeconds * 1000)
+
+    return () => window.clearInterval(timer)
+  }, [loadPlaytime, settings])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void loadTrackingWorkspace()
+    }, LIVE_POLL_INTERVAL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [loadTrackingWorkspace])
+
+  useEffect(() => {
+    if (!uiState.liveMilestonesEnabled || !('Notification' in window)) {
+      return
+    }
+
+    if (window.Notification.permission === 'default') {
+      void window.Notification.requestPermission().catch(() => {})
+    }
+  }, [uiState.liveMilestonesEnabled])
+
+  useEffect(() => {
+    if (!uiState.liveMilestonesEnabled || !trackedOverview?.activeSession.startedAt || !trackedOverview.activeSession.isTracking) {
+      liveMilestoneRef.current = {
+        sessionKey: null,
+        thresholds: new Set<number>(),
+        pbWatchScenario: null,
+      }
+      return
+    }
+
+    const sessionKey = `${trackedOverview.activeSession.startedAt}:${trackedOverview.activeSession.scenarioPath ?? ''}`
+    const current = liveMilestoneRef.current
+    if (current.sessionKey !== sessionKey) {
+      liveMilestoneRef.current = {
+        sessionKey,
+        thresholds: new Set<number>(),
+        pbWatchScenario: null,
+      }
+      pushLiveNotification({
+        title: 'Live tracking started',
+        body: trackedOverview.activeSession.scenarioName
+          ? `Tracking ${trackedOverview.activeSession.scenarioName}.`
+          : 'A live KovaaK session is now being tracked.',
+        tone: 'neutral',
+      })
+    }
+
+    const elapsedMinutes = Math.floor((Date.now() / 1000 - trackedOverview.activeSession.startedAt) / 60)
+    for (const threshold of [10, 20, 30, 45, 60]) {
+      if (elapsedMinutes >= threshold && !liveMilestoneRef.current.thresholds.has(threshold)) {
+        liveMilestoneRef.current.thresholds.add(threshold)
+        pushLiveNotification({
+          title: 'Session milestone',
+          body: `You have been in-session for ${threshold} minutes.`,
+          tone: threshold >= 45 ? 'declining' : 'improving',
+        })
+      }
+    }
+
+    const pbWatchScenario = getScenariosForPreset(summary, 'pbHunt').find(
+      (scenario) => scenario.scenarioName === trackedOverview.activeSession.scenarioName,
+    )
+    if (
+      pbWatchScenario &&
+      liveMilestoneRef.current.pbWatchScenario !== pbWatchScenario.scenarioName
+    ) {
+      liveMilestoneRef.current.pbWatchScenario = pbWatchScenario.scenarioName
+      pushLiveNotification({
+        title: 'PB watch',
+        body: `${pbWatchScenario.scenarioName} is close to its personal best. Good time to push quality.`,
+        tone: 'improving',
+      })
+    }
+  }, [pushLiveNotification, summary, trackedOverview, uiState.liveMilestonesEnabled])
+
+  useEffect(() => {
+    const unlisten = listen('app://hidden-to-tray', () => {
+      pushLiveNotification({
+        title: 'Hidden to tray',
+        body: 'The app is still running in the system tray.',
+        tone: 'neutral',
+      })
+    })
+
+    return () => {
+      void unlisten.then((cleanup) => cleanup())
+    }
+  }, [pushLiveNotification])
 
   useEffect(() => {
     if (!summary || summary.dailySummaries.length === 0) {
@@ -341,18 +637,135 @@ function App() {
     }))
   }
 
+  function applyFocusPreset(presetId: UIState['activeFocusPreset']) {
+    const nextFilters = getPresetFilters(presetId)
+    setUiState((current) => ({
+      ...current,
+      activeFocusPreset: presetId,
+      ...nextFilters,
+    }))
+  }
+
+  function updateGoalTarget(goalId: TrainingGoal['id'], target: number) {
+    setGoals((current) =>
+      current.map((goal) =>
+        goal.id === goalId
+          ? { ...goal, target: Math.max(1, Number.isFinite(target) ? Math.round(target) : goal.target) }
+          : goal,
+      ),
+    )
+  }
+
+  async function handleSaveSettings() {
+    if (!settingsDraft) {
+      return
+    }
+
+    setIsSavingSettings(true)
+    setSettingsSaveMessage('')
+    try {
+      const nextSettings = await invoke<UserSettings>('update_app_settings', {
+        input: {
+          sessionPathOverride: settingsDraft.sessionPathOverride ?? '',
+          startWithWindows: settingsDraft.startWithWindows,
+          minimizeToTray: settingsDraft.minimizeToTray,
+          autoCheckUpdates: settingsDraft.autoCheckUpdates,
+          refreshIntervalSeconds: settingsDraft.refreshIntervalSeconds,
+        },
+      })
+      setSettings(nextSettings)
+      setSettingsDraft(nextSettings)
+      setSettingsSaveMessage('Settings saved.')
+    } catch (error) {
+      setSettingsSaveMessage(`Failed to save settings: ${String(error)}`)
+    } finally {
+      setIsSavingSettings(false)
+    }
+  }
+
+  async function handleCreatePlaylist(name: string) {
+    const created = await invoke<PlaylistRecord>('create_playlist_record', { name })
+    const nextPlaylists = await invoke<PlaylistRecord[]>('get_playlist_records')
+    setPlaylistRecords(nextPlaylists)
+    setUiState((current) => ({
+      ...current,
+      selectedPlaylistId: created.id,
+    }))
+  }
+
+  async function handleSavePlaylistMappings(playlistId: number, scenarioPaths: string[]) {
+    const nextPlaylists = await invoke<PlaylistRecord[]>('set_playlist_record_mappings', {
+      playlist_id: playlistId,
+      scenario_paths: scenarioPaths,
+    })
+    setPlaylistRecords(nextPlaylists)
+    await loadTrackingWorkspace()
+  }
+
+  function handleCreateFocusArea(label: string) {
+    const normalized = label.trim()
+    if (!normalized) {
+      return
+    }
+
+    const nextFocusArea: FocusArea = {
+      id: `focus-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      label: normalized,
+      scenarioNames: [],
+    }
+    setFocusAreas((current) => [...current, nextFocusArea])
+    setUiState((current) => ({
+      ...current,
+      selectedFocusAreaId: nextFocusArea.id,
+    }))
+  }
+
+  function handleDeleteFocusArea(focusAreaId: string) {
+    setFocusAreas((current) => current.filter((focusArea) => focusArea.id !== focusAreaId))
+    setUiState((current) => ({
+      ...current,
+      selectedFocusAreaId:
+        current.selectedFocusAreaId === focusAreaId ? null : current.selectedFocusAreaId,
+    }))
+  }
+
+  function handleToggleFocusAreaScenario(focusAreaId: string, scenarioName: string) {
+    setFocusAreas((current) =>
+      current.map((focusArea) =>
+        focusArea.id !== focusAreaId
+          ? focusArea
+          : {
+              ...focusArea,
+              scenarioNames: focusArea.scenarioNames.includes(scenarioName)
+                ? focusArea.scenarioNames.filter((name) => name !== scenarioName)
+                : [...focusArea.scenarioNames, scenarioName],
+            },
+      ),
+    )
+  }
+
+  const headerSubtitle =
+    uiState.activeView === 'today'
+      ? 'Daily coaching, live status, and session recap.'
+      : uiState.activeView === 'analysis'
+        ? 'Trend drill-down, calendar review, and scenario explorer.'
+        : uiState.activeView === 'practice'
+          ? 'Live session companion, goals, presets, and playlist mapping.'
+          : 'Local settings, tracker diagnostics, and update behavior.'
+
   return (
     <main className="app-shell">
       <header className="app-header">
         <div className="header-main">
           <div>
             <p className="eyebrow app-eyebrow">KovaaK Stats</p>
-            <h1 className="app-title">Performance Dashboard</h1>
+            <h1 className="app-title">Offline Aim Coach</h1>
+            <p className="subtle">{headerSubtitle}</p>
             <p className="subtle">{formatRefreshTimestamp(lastRefreshAt)}</p>
           </div>
 
           <div className="header-actions">
-            <button className="btn" onClick={() => void loadPlaytime()} disabled={isLoading} type="button">
+            <button className="btn" onClick={() => void refreshWorkspace()} disabled={isLoading} type="button">
               {isLoading ? 'Refreshing...' : 'Refresh'}
             </button>
             <button
@@ -368,7 +781,7 @@ function App() {
             >
               {isInstallingUpdate ? 'Installing update...' : isCheckingForUpdates ? 'Checking updates...' : 'Check for updates'}
             </button>
-            <button className="btn btn-secondary" onClick={() => void handleQuit()} disabled={isLoading} type="button">
+            <button className="btn btn-secondary" onClick={() => void handleQuit()} type="button">
               Quit App
             </button>
           </div>
@@ -382,7 +795,7 @@ function App() {
                 <h2 className="update-banner-title">Version {availableUpdate.version} is ready to install</h2>
                 <p className="subtle">
                   Current version {availableUpdate.currentVersion}
-                  {formatUpdateDate(availableUpdate.date) ? ` • Published ${formatUpdateDate(availableUpdate.date)}` : ''}
+                  {formatUpdateDate(availableUpdate.date) ? ` | Published ${formatUpdateDate(availableUpdate.date)}` : ''}
                 </p>
               </div>
 
@@ -427,17 +840,55 @@ function App() {
         </nav>
       </header>
 
+      {liveNotifications.length > 0 ? (
+        <aside className="toast-stack" aria-live="polite">
+          {liveNotifications.map((notification) => (
+            <div key={notification.id} className={`toast-card tone-${notification.tone}`}>
+              <strong>{notification.title}</strong>
+              <span className="subtle">{notification.body}</span>
+            </div>
+          ))}
+        </aside>
+      ) : null}
+
       <section className="content-frame" aria-live="polite">
-        {uiState.activeView === 'overview' ? (
-          <OverviewView
+        {uiState.activeView === 'today' ? (
+          <TodayView
             summary={summary}
+            trackedOverview={trackedOverview}
+            settings={settings}
             selectedDay={dashboardModel.selectedDay}
+            sessionRecap={sessionRecap}
+            goalProgress={goalProgress}
+            readinessSummary={readinessSummary}
+            personalBestTimeline={personalBestTimeline}
+            focusPresets={FOCUS_PRESETS}
+            activeFocusPreset={uiState.activeFocusPreset}
             statusMessage={statusMessage}
+            onOpenPractice={() => setUiState((current) => ({ ...current, activeView: 'practice' }))}
+            onOpenAnalysis={() => setUiState((current) => ({ ...current, activeView: 'analysis' }))}
+            onOpenSettings={() => setUiState((current) => ({ ...current, activeView: 'settings' }))}
+            onActivateFocusPreset={applyFocusPreset}
           />
         ) : null}
 
-        {uiState.activeView === 'calendar' ? (
-          <CalendarView
+        {uiState.activeView === 'analysis' ? (
+          <AnalysisView
+            summary={summary}
+            statusMessage={statusMessage}
+            playlistQuery={uiState.playlistQuery}
+            scenarioQuery={uiState.scenarioQuery}
+            scenarioTrendFilter={uiState.scenarioTrendFilter}
+            scenarioVolumeFilter={uiState.scenarioVolumeFilter}
+            scenarioRecencyFilter={uiState.scenarioRecencyFilter}
+            scenarioSortField={uiState.scenarioSortField}
+            activeFocusPreset={uiState.activeFocusPreset}
+            focusAreaSummaries={focusAreaSummaries}
+            readinessSummary={readinessSummary}
+            personalBestTimeline={personalBestTimeline}
+            filteredPlaylists={breakdownsModel.filteredPlaylists}
+            filteredScenarios={breakdownsModel.visibleScenarios}
+            selectedScenario={breakdownsModel.selectedScenario}
             hasCalendarRange={dashboardModel.hasCalendarRange}
             activeMonthKey={dashboardModel.activeMonthKey}
             canGoPrevious={dashboardModel.canGoPrevious}
@@ -448,34 +899,89 @@ function App() {
             visibleMonthPeakSeconds={dashboardModel.visibleMonthPeakSeconds}
             onMonthChange={handleMonthChange}
             onSelectDate={(dateKey) => setUiState((current) => ({ ...current, selectedDateKey: dateKey }))}
-          />
-        ) : null}
-
-        {uiState.activeView === 'breakdowns' ? (
-          <BreakdownsView
-            summary={summary}
-            playlistQuery={uiState.playlistQuery}
-            scenarioQuery={uiState.scenarioQuery}
-            scenarioTrendFilter={uiState.scenarioTrendFilter}
-            scenarioVolumeFilter={uiState.scenarioVolumeFilter}
-            scenarioRecencyFilter={uiState.scenarioRecencyFilter}
-            scenarioSortField={uiState.scenarioSortField}
-            filteredPlaylists={breakdownsModel.filteredPlaylists}
-            filteredScenarios={breakdownsModel.visibleScenarios}
-            selectedScenario={breakdownsModel.selectedScenario}
             onPlaylistQueryChange={(next) => setUiState((current) => ({ ...current, playlistQuery: next }))}
             onScenarioQueryChange={(next) => setUiState((current) => ({ ...current, scenarioQuery: next }))}
             onScenarioTrendFilterChange={(next) => setUiState((current) => ({ ...current, scenarioTrendFilter: next }))}
             onScenarioVolumeFilterChange={(next) => setUiState((current) => ({ ...current, scenarioVolumeFilter: next }))}
-            onScenarioRecencyFilterChange={(next) =>
-              setUiState((current) => ({ ...current, scenarioRecencyFilter: next }))
-            }
+            onScenarioRecencyFilterChange={(next) => setUiState((current) => ({ ...current, scenarioRecencyFilter: next }))}
             onScenarioSortFieldChange={(next) => setUiState((current) => ({ ...current, scenarioSortField: next }))}
             onSelectScenario={(next) => setUiState((current) => ({ ...current, selectedScenarioName: next }))}
+            onApplyFocusPreset={applyFocusPreset}
           />
         ) : null}
 
-        {uiState.activeView === 'coach' ? <CoachView summary={summary} /> : null}
+        {uiState.activeView === 'practice' ? (
+          <PracticeView
+            summary={summary}
+            trackedOverview={trackedOverview}
+            activeFocusPreset={uiState.activeFocusPreset}
+            selectedFocusAreaId={uiState.selectedFocusAreaId}
+            planDurationMinutes={uiState.planDurationMinutes}
+            presetScenarios={presetScenarios}
+            focusAreas={focusAreas}
+            focusAreaSummaries={focusAreaSummaries}
+            readinessSummary={readinessSummary}
+            trainingPlan={trainingPlan}
+            goals={goals}
+            goalProgress={goalProgress}
+            playlistRecords={playlistRecords}
+            trackedScenarios={trackedScenarios}
+            selectedPlaylistId={uiState.selectedPlaylistId}
+            trackedScenarioQuery={uiState.trackedScenarioQuery}
+            onActivateFocusPreset={applyFocusPreset}
+            onGoalTargetChange={updateGoalTarget}
+            onSelectFocusArea={(focusAreaId) => setUiState((current) => ({ ...current, selectedFocusAreaId: focusAreaId }))}
+            onPlanDurationChange={(planDurationMinutes) =>
+              setUiState((current) => ({
+                ...current,
+                planDurationMinutes,
+              }))
+            }
+            onOpenAnalysisPreset={() =>
+              setUiState((current) => ({
+                ...current,
+                activeView: 'analysis',
+              }))
+            }
+            onCreateFocusArea={handleCreateFocusArea}
+            onDeleteFocusArea={handleDeleteFocusArea}
+            onToggleFocusAreaScenario={handleToggleFocusAreaScenario}
+            onSelectPlaylist={(playlistId) => setUiState((current) => ({ ...current, selectedPlaylistId: playlistId }))}
+            onTrackedScenarioQueryChange={(value) =>
+              setUiState((current) => ({
+                ...current,
+                trackedScenarioQuery: value,
+              }))
+            }
+            onCreatePlaylist={handleCreatePlaylist}
+            onSavePlaylistMappings={handleSavePlaylistMappings}
+          />
+        ) : null}
+
+        {uiState.activeView === 'settings' ? (
+          <SettingsView
+            settings={settings}
+            draft={settingsDraft}
+            trackedOverview={trackedOverview}
+            isSaving={isSavingSettings}
+            saveMessage={settingsSaveMessage}
+            liveMilestonesEnabled={uiState.liveMilestonesEnabled}
+            onChange={setSettingsDraft}
+            onSave={() => void handleSaveSettings()}
+            onToggleLiveMilestones={(enabled) =>
+              setUiState((current) => ({
+                ...current,
+                liveMilestonesEnabled: enabled,
+              }))
+            }
+            onCheckForUpdates={() =>
+              void runUpdateCheck({
+                showNoUpdateMessage: true,
+                showErrors: true,
+              })
+            }
+          />
+        ) : null}
       </section>
     </main>
   )
