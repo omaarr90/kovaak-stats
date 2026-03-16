@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import DataTable, { type DataTableColumn } from '../components/primitives/DataTable'
 import EmptyState from '../components/primitives/EmptyState'
 import MetricChip from '../components/primitives/MetricChip'
@@ -46,14 +46,22 @@ type PracticeViewProps = {
   trackedScenarios: ScenarioRef[]
   selectedPlaylistId: number | null
   trackedScenarioQuery: string
+  isGoalsDirty: boolean
+  goalsSaveMessage: string
+  goalsSaveTone: 'neutral' | 'error'
+  isFocusAreasDirty: boolean
+  focusAreasSaveMessage: string
+  focusAreasSaveTone: 'neutral' | 'error'
   onActivateFocusPreset: (presetId: FocusPresetId) => void
   onGoalTargetChange: (goalId: TrainingGoal['id'], target: number) => void
+  onSaveGoals: () => void
   onSelectFocusArea: (focusAreaId: string | null) => void
   onPlanDurationChange: (minutes: PracticeDuration) => void
   onOpenAnalysisPreset: () => void
   onCreateFocusArea: (label: string) => void
   onDeleteFocusArea: (focusAreaId: string) => void
   onToggleFocusAreaScenario: (focusAreaId: string, scenarioName: string) => void
+  onSaveFocusAreas: () => void
   onSelectPlaylist: (playlistId: number) => void
   onTrackedScenarioQueryChange: (value: string) => void
   onCreatePlaylist: (name: string) => Promise<void>
@@ -77,19 +85,31 @@ function PracticeView({
   trackedScenarios,
   selectedPlaylistId,
   trackedScenarioQuery,
+  isGoalsDirty,
+  goalsSaveMessage,
+  goalsSaveTone,
+  isFocusAreasDirty,
+  focusAreasSaveMessage,
+  focusAreasSaveTone,
   onActivateFocusPreset,
   onGoalTargetChange,
+  onSaveGoals,
   onSelectFocusArea,
   onPlanDurationChange,
   onOpenAnalysisPreset,
   onCreateFocusArea,
   onDeleteFocusArea,
   onToggleFocusAreaScenario,
+  onSaveFocusAreas,
   onSelectPlaylist,
   onTrackedScenarioQueryChange,
   onCreatePlaylist,
   onSavePlaylistMappings,
 }: PracticeViewProps) {
+  const focusAreaInputId = useId()
+  const playlistNameInputId = useId()
+  const trackedScenarioSearchId = useId()
+  const goalTargetIdPrefix = useId()
   const [newPlaylistName, setNewPlaylistName] = useState('')
   const [draftScenarioPaths, setDraftScenarioPaths] = useState<string[]>([])
   const [mappingStatus, setMappingStatus] = useState('')
@@ -98,6 +118,10 @@ function PracticeView({
   const [newFocusAreaLabel, setNewFocusAreaLabel] = useState('')
   const selectedPlaylist = playlistRecords.find((playlist) => playlist.id === selectedPlaylistId) ?? playlistRecords[0] ?? null
   const selectedFocusArea = focusAreas.find((focusArea) => focusArea.id === selectedFocusAreaId) ?? null
+  const goalsStatusText =
+    goalsSaveMessage || (isGoalsDirty ? 'Unsaved changes. Save to update Today and Analysis.' : '')
+  const focusAreasStatusText =
+    focusAreasSaveMessage || (isFocusAreasDirty ? 'Unsaved changes. Save to update Today and Analysis.' : '')
 
   useEffect(() => {
     setDraftScenarioPaths(selectedPlaylist?.scenarioPaths ?? [])
@@ -362,19 +386,33 @@ function PracticeView({
           <SectionHeader
             title="Focus Areas"
             description="Create custom buckets and assign scenarios into them for balance and neglect reporting."
+            actions={
+              <button className="btn" type="button" onClick={onSaveFocusAreas} disabled={!isFocusAreasDirty}>
+                Save focus areas
+              </button>
+            }
           />
           <div className="inline-input-row">
-            <input
-              className="text-input"
-              type="text"
-              value={newFocusAreaLabel}
-              onChange={(event) => setNewFocusAreaLabel(event.target.value)}
-              placeholder="Create a focus area"
-            />
+            <label className="settings-field field-grow" htmlFor={focusAreaInputId}>
+              <span className="label">New focus area</span>
+              <input
+                id={focusAreaInputId}
+                className="text-input"
+                type="text"
+                value={newFocusAreaLabel}
+                onChange={(event) => setNewFocusAreaLabel(event.target.value)}
+                placeholder="Create a focus area"
+              />
+            </label>
             <button className="btn" type="button" onClick={handleCreateFocusAreaClick}>
               Add focus area
             </button>
           </div>
+          {focusAreasStatusText ? (
+            <p className={`header-status${focusAreasSaveTone === 'error' ? ' is-error' : ''}`} role="status" aria-live="polite">
+              {focusAreasStatusText}
+            </p>
+          ) : null}
           {focusAreas.length > 0 ? (
             <>
               <div className="playlist-pill-row">
@@ -481,6 +519,11 @@ function PracticeView({
           <SectionHeader
             title="Weekly Goals & Readiness"
             description="Targets are editable here, and recent load is checked against your longer baseline."
+            actions={
+              <button className="btn" type="button" onClick={onSaveGoals} disabled={!isGoalsDirty}>
+                Save goals
+              </button>
+            }
           />
           <div className="chip-grid">
             <MetricChip
@@ -503,9 +546,15 @@ function PracticeView({
             />
           </div>
           <p className="subtle">{readinessSummary.message}</p>
+          {goalsStatusText ? (
+            <p className={`header-status${goalsSaveTone === 'error' ? ' is-error' : ''}`} role="status" aria-live="polite">
+              {goalsStatusText}
+            </p>
+          ) : null}
           <div className="goal-list">
             {goals.map((goal) => {
               const progress = goalProgress.find((item) => item.id === goal.id)
+              const goalTargetId = `${goalTargetIdPrefix}-${goal.id}`
               return (
                 <div key={goal.id} className="goal-item">
                   <div className="goal-item-head">
@@ -515,13 +564,17 @@ function PracticeView({
                     </span>
                   </div>
                   <div className="goal-editor-row">
-                    <input
-                      className="text-input small-input"
-                      type="number"
-                      min="1"
-                      value={goal.target}
-                      onChange={(event) => onGoalTargetChange(goal.id, Number(event.target.value))}
-                    />
+                    <label className="settings-field goal-target-field" htmlFor={goalTargetId}>
+                      <span className="label">{goal.label} target</span>
+                      <input
+                        id={goalTargetId}
+                        className="text-input small-input"
+                        type="number"
+                        min="1"
+                        value={goal.target}
+                        onChange={(event) => onGoalTargetChange(goal.id, Number(event.target.value))}
+                      />
+                    </label>
                     <div className="goal-bar" aria-hidden="true">
                       <span style={{ width: `${Math.max(6, Math.round((progress?.progress ?? 0) * 100))}%` }} />
                     </div>
@@ -580,13 +633,17 @@ function PracticeView({
 
           <div className="settings-stack">
             <div className="inline-input-row">
-              <input
-                className="text-input"
-                type="text"
-                value={newPlaylistName}
-                onChange={(event) => setNewPlaylistName(event.target.value)}
-                placeholder="Create a new tracked playlist"
-              />
+              <label className="settings-field field-grow" htmlFor={playlistNameInputId}>
+                <span className="label">New tracked playlist</span>
+                <input
+                  id={playlistNameInputId}
+                  className="text-input"
+                  type="text"
+                  value={newPlaylistName}
+                  onChange={(event) => setNewPlaylistName(event.target.value)}
+                  placeholder="Create a new tracked playlist"
+                />
+              </label>
               <button className="btn" type="button" onClick={() => void handleCreatePlaylist()} disabled={isCreatingPlaylist}>
                 {isCreatingPlaylist ? 'Creating...' : 'Create playlist'}
               </button>
@@ -610,13 +667,17 @@ function PracticeView({
 
             {selectedPlaylist ? (
               <>
-                <input
-                  className="search-input"
-                  type="search"
-                  value={trackedScenarioQuery}
-                  onChange={(event) => onTrackedScenarioQueryChange(event.target.value)}
-                  placeholder="Search tracked scenario paths"
-                />
+                <label className="settings-field" htmlFor={trackedScenarioSearchId}>
+                  <span className="label">Tracked scenario search</span>
+                  <input
+                    id={trackedScenarioSearchId}
+                    className="search-input"
+                    type="search"
+                    value={trackedScenarioQuery}
+                    onChange={(event) => onTrackedScenarioQueryChange(event.target.value)}
+                    placeholder="Search tracked scenario paths"
+                  />
+                </label>
                 <div className="mapping-checklist">
                   {filteredTrackedScenarios.map((scenario) => {
                     const checked = draftScenarioPaths.includes(scenario.scenarioPath)
@@ -646,7 +707,11 @@ function PracticeView({
               />
             )}
 
-            {mappingStatus ? <p className="header-status">{mappingStatus}</p> : null}
+            {mappingStatus ? (
+              <p className="header-status" role="status" aria-live="polite">
+                {mappingStatus}
+              </p>
+            ) : null}
           </div>
         </PanelCard>
 

@@ -1,4 +1,4 @@
-import { type CSSProperties } from 'react'
+import { type CSSProperties, useId } from 'react'
 import DataTable, { type DataTableColumn } from '../components/primitives/DataTable'
 import EmptyState from '../components/primitives/EmptyState'
 import MetricChip from '../components/primitives/MetricChip'
@@ -53,6 +53,7 @@ type AnalysisViewProps = {
   filteredPlaylists: PlaytimeSummary['playlists']
   filteredScenarios: PlaytimeSummary['scenarioAnalytics']
   selectedScenario: ScenarioAnalytics | null
+  selectedScenarioIsVisible: boolean
   hasCalendarRange: boolean
   activeMonthKey: string
   canGoPrevious: boolean
@@ -121,6 +122,7 @@ function AnalysisView({
   filteredPlaylists,
   filteredScenarios,
   selectedScenario,
+  selectedScenarioIsVisible,
   hasCalendarRange,
   activeMonthKey,
   canGoPrevious,
@@ -140,6 +142,12 @@ function AnalysisView({
   onSelectScenario,
   onApplyFocusPreset,
 }: AnalysisViewProps) {
+  const scenarioSearchId = useId()
+  const scenarioTrendFilterId = useId()
+  const scenarioVolumeFilterId = useId()
+  const scenarioRecencyFilterId = useId()
+  const scenarioSortId = useId()
+  const playlistSearchId = useId()
   if (!summary) {
     return (
       <div className="view-shell">
@@ -499,58 +507,77 @@ function AnalysisView({
             description="Search, filter, and sort scenarios before opening the detail inspector."
           />
           <div className="filter-grid">
-            <input
-              className="search-input"
-              type="search"
-              value={scenarioQuery}
-              onChange={(event) => onScenarioQueryChange(event.target.value)}
-              placeholder="Search scenarios"
-              aria-label="Search scenarios"
-            />
-            <select
-              className="filter-select"
-              value={scenarioTrendFilter}
-              onChange={(event) => onScenarioTrendFilterChange(event.target.value as ScenarioTrendFilter)}
-            >
-              {TREND_FILTER_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <select
-              className="filter-select"
-              value={scenarioVolumeFilter}
-              onChange={(event) => onScenarioVolumeFilterChange(event.target.value as ScenarioVolumeFilter)}
-            >
-              {VOLUME_FILTER_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <select
-              className="filter-select"
-              value={scenarioRecencyFilter}
-              onChange={(event) => onScenarioRecencyFilterChange(event.target.value as ScenarioRecencyFilter)}
-            >
-              {RECENCY_FILTER_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <select
-              className="filter-select"
-              value={scenarioSortField}
-              onChange={(event) => onScenarioSortFieldChange(event.target.value as ScenarioSortField)}
-            >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+            <label className="settings-field" htmlFor={scenarioSearchId}>
+              <span className="label">Scenario search</span>
+              <input
+                id={scenarioSearchId}
+                className="search-input"
+                type="search"
+                value={scenarioQuery}
+                onChange={(event) => onScenarioQueryChange(event.target.value)}
+                placeholder="Search scenarios"
+              />
+            </label>
+            <label className="settings-field" htmlFor={scenarioTrendFilterId}>
+              <span className="label">Trend</span>
+              <select
+                id={scenarioTrendFilterId}
+                className="filter-select"
+                value={scenarioTrendFilter}
+                onChange={(event) => onScenarioTrendFilterChange(event.target.value as ScenarioTrendFilter)}
+              >
+                {TREND_FILTER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="settings-field" htmlFor={scenarioVolumeFilterId}>
+              <span className="label">Recent volume</span>
+              <select
+                id={scenarioVolumeFilterId}
+                className="filter-select"
+                value={scenarioVolumeFilter}
+                onChange={(event) => onScenarioVolumeFilterChange(event.target.value as ScenarioVolumeFilter)}
+              >
+                {VOLUME_FILTER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="settings-field" htmlFor={scenarioRecencyFilterId}>
+              <span className="label">Recency</span>
+              <select
+                id={scenarioRecencyFilterId}
+                className="filter-select"
+                value={scenarioRecencyFilter}
+                onChange={(event) => onScenarioRecencyFilterChange(event.target.value as ScenarioRecencyFilter)}
+              >
+                {RECENCY_FILTER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="settings-field" htmlFor={scenarioSortId}>
+              <span className="label">Sort by</span>
+              <select
+                id={scenarioSortId}
+                className="filter-select"
+                value={scenarioSortField}
+                onChange={(event) => onScenarioSortFieldChange(event.target.value as ScenarioSortField)}
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           <DataTable
@@ -573,6 +600,11 @@ function AnalysisView({
 
           {selectedScenario ? (
             <>
+              {!selectedScenarioIsVisible ? (
+                <p className="subtle filter-note">
+                  This scenario is hidden by the current filters, but the inspector keeps it in focus until you choose another row.
+                </p>
+              ) : null}
               <div className="chip-grid">
                 <MetricChip label="Trend" value={formatTrendStatus(selectedScenario.trendStatus)} />
                 <MetricChip label="30d delta" value={formatDeltaPercent(selectedScenario.deltaPct)} />
@@ -634,14 +666,17 @@ function AnalysisView({
 
       <PanelCard>
         <SectionHeader title="Playlist Explorer" description="Current playlist files are inferred from the latest KovaaK playlist JSON files." />
-        <input
-          className="search-input"
-          type="search"
-          value={playlistQuery}
-          onChange={(event) => onPlaylistQueryChange(event.target.value)}
-          placeholder="Search playlists"
-          aria-label="Search playlists"
-        />
+        <label className="settings-field" htmlFor={playlistSearchId}>
+          <span className="label">Playlist search</span>
+          <input
+            id={playlistSearchId}
+            className="search-input"
+            type="search"
+            value={playlistQuery}
+            onChange={(event) => onPlaylistQueryChange(event.target.value)}
+            placeholder="Search playlists"
+          />
+        </label>
         <DataTable
           columns={playlistColumns}
           rows={filteredPlaylists}

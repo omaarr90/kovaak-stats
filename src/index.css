@@ -7,6 +7,17 @@
 
   --surface-1: rgba(10, 15, 29, 0.88);
   --surface-2: rgba(16, 24, 41, 0.92);
+  --surface-shell: radial-gradient(circle at top right, rgba(56, 189, 248, 0.14), transparent 52%), linear-gradient(175deg, rgba(16, 24, 41, 0.95), rgba(8, 13, 24, 0.95));
+  --surface-banner: radial-gradient(circle at top right, rgba(56, 189, 248, 0.2), transparent 54%), linear-gradient(180deg, rgba(8, 18, 34, 0.96), rgba(5, 12, 24, 0.96));
+  --surface-panel: radial-gradient(circle at top left, rgba(14, 165, 233, 0.12), transparent 44%), linear-gradient(180deg, rgba(14, 20, 35, 0.95), rgba(8, 12, 22, 0.95));
+  --surface-control: rgba(6, 10, 20, 0.82);
+  --surface-switcher: rgba(7, 11, 22, 0.9);
+  --surface-interactive: rgba(10, 15, 29, 0.82);
+  --surface-interactive-hover: rgba(51, 65, 85, 0.5);
+  --surface-interactive-active: rgba(14, 116, 144, 0.42);
+  --surface-button: linear-gradient(180deg, rgba(2, 132, 199, 0.5), rgba(8, 47, 73, 0.5));
+  --surface-button-hover: linear-gradient(180deg, rgba(14, 165, 233, 0.56), rgba(14, 116, 144, 0.58));
+  --surface-button-secondary: rgba(15, 23, 42, 0.74);
 
   --text-primary: #f8fbff;
   --text-secondary: #d7e2f0;
@@ -18,6 +29,9 @@
 
   --border-soft: rgba(51, 65, 85, 0.5);
   --border-muted: rgba(71, 85, 105, 0.72);
+  --border-accent-soft: rgba(125, 211, 252, 0.36);
+  --border-accent-strong: rgba(125, 211, 252, 0.75);
+  --text-accent-strong: #ecfeff;
 
   --radius-sm: 12px;
   --radius-md: 16px;
@@ -27,6 +41,9 @@
   --space-2: 0.5rem;
   --space-3: 0.9rem;
   --space-4: 1.2rem;
+
+  --control-min-height: 44px;
+  --control-padding-inline: 0.75rem;
 
   --shadow-md: 0 14px 28px rgba(2, 6, 23, 0.25);
   --shadow-lg: 0 20px 42px rgba(2, 6, 23, 0.32);

@@ -19,13 +19,19 @@ import {
   buildFocusAreaSummaries,
   buildPersonalBestTimeline,
   buildReadinessSummary,
-  buildSessionRecap,
   buildTrainingPlan,
   DEFAULT_TRAINING_GOALS,
-  FOCUS_PRESETS,
   getPresetFilters,
   getScenariosForPreset,
 } from './training-insights'
+import {
+  createFocusAreaDraft,
+  createTrainingGoalDraft,
+  finalizeFocusAreaDraft,
+  finalizeTrainingGoalDraft,
+  haveFocusAreaDraftChanges,
+  haveTrainingGoalDraftChanges,
+} from './practice-drafts'
 import {
   type AppDashboardView,
   type FocusArea,
@@ -109,16 +115,16 @@ function readStoredGoals(): TrainingGoal[] {
   try {
     const raw = window.localStorage.getItem(GOALS_STORAGE_KEY)
     if (!raw) {
-      return DEFAULT_TRAINING_GOALS
+      return finalizeTrainingGoalDraft(DEFAULT_TRAINING_GOALS)
     }
 
     const parsed = JSON.parse(raw) as TrainingGoal[]
     return DEFAULT_TRAINING_GOALS.map((goal) => {
       const stored = parsed.find((candidate) => candidate.id === goal.id)
-      return stored ? { ...goal, ...stored } : goal
+      return stored ? { ...goal, ...stored } : { ...goal }
     })
   } catch {
-    return DEFAULT_TRAINING_GOALS
+    return finalizeTrainingGoalDraft(DEFAULT_TRAINING_GOALS)
   }
 }
 
@@ -130,10 +136,18 @@ function readStoredFocusAreas(): FocusArea[] {
     }
 
     const parsed = JSON.parse(raw) as FocusArea[]
-    return parsed.filter((focusArea) => focusArea.id && focusArea.label)
+    return finalizeFocusAreaDraft(parsed.filter((focusArea) => focusArea.id && focusArea.label))
   } catch {
     return []
   }
+}
+
+function writeStoredGoals(goals: TrainingGoal[]) {
+  window.localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals))
+}
+
+function writeStoredFocusAreas(focusAreas: FocusArea[]) {
+  window.localStorage.setItem(FOCUS_AREAS_STORAGE_KEY, JSON.stringify(focusAreas))
 }
 
 function formatBytes(bytes: number): string {
@@ -184,7 +198,13 @@ function App() {
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [settingsDraft, setSettingsDraft] = useState<UserSettings | null>(null)
   const [goals, setGoals] = useState<TrainingGoal[]>(readStoredGoals)
+  const [goalDrafts, setGoalDrafts] = useState<TrainingGoal[]>(() => createTrainingGoalDraft(readStoredGoals()))
   const [focusAreas, setFocusAreas] = useState<FocusArea[]>(readStoredFocusAreas)
+  const [focusAreaDrafts, setFocusAreaDrafts] = useState<FocusArea[]>(() => createFocusAreaDraft(readStoredFocusAreas()))
+  const [goalsSaveMessage, setGoalsSaveMessage] = useState('')
+  const [goalsSaveTone, setGoalsSaveTone] = useState<'neutral' | 'error'>('neutral')
+  const [focusAreasSaveMessage, setFocusAreasSaveMessage] = useState('')
+  const [focusAreasSaveTone, setFocusAreasSaveTone] = useState<'neutral' | 'error'>('neutral')
   const [liveNotifications, setLiveNotifications] = useState<LiveNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [statusMessage, setStatusMessage] = useState('')
@@ -242,27 +262,36 @@ function App() {
     () => getScenariosForPreset(summary, uiState.activeFocusPreset),
     [summary, uiState.activeFocusPreset],
   )
-  const goalProgress = useMemo(() => buildGoalProgress(summary, goals), [summary, goals])
   const focusAreaSummaries = useMemo(() => buildFocusAreaSummaries(summary, focusAreas), [summary, focusAreas])
   const readinessSummary = useMemo(
     () => buildReadinessSummary(summary, focusAreaSummaries),
     [summary, focusAreaSummaries],
   )
   const personalBestTimeline = useMemo(() => buildPersonalBestTimeline(summary), [summary])
-  const trainingPlan = useMemo(
+  const practiceGoalProgress = useMemo(() => buildGoalProgress(summary, goalDrafts), [summary, goalDrafts])
+  const practiceFocusAreaSummaries = useMemo(
+    () => buildFocusAreaSummaries(summary, focusAreaDrafts),
+    [summary, focusAreaDrafts],
+  )
+  const practiceReadinessSummary = useMemo(
+    () => buildReadinessSummary(summary, practiceFocusAreaSummaries),
+    [summary, practiceFocusAreaSummaries],
+  )
+  const practiceTrainingPlan = useMemo(
     () =>
       buildTrainingPlan(
         summary,
-        focusAreas,
+        focusAreaDrafts,
         uiState.activeFocusPreset,
         uiState.selectedFocusAreaId,
         uiState.planDurationMinutes,
       ),
-    [focusAreas, summary, uiState.activeFocusPreset, uiState.planDurationMinutes, uiState.selectedFocusAreaId],
+    [focusAreaDrafts, summary, uiState.activeFocusPreset, uiState.planDurationMinutes, uiState.selectedFocusAreaId],
   )
-  const sessionRecap = useMemo(
-    () => buildSessionRecap(summary, dashboardModel.selectedDay.dateKey),
-    [dashboardModel.selectedDay.dateKey, summary],
+  const isGoalsDirty = useMemo(() => haveTrainingGoalDraftChanges(goals, goalDrafts), [goals, goalDrafts])
+  const isFocusAreasDirty = useMemo(
+    () => haveFocusAreaDraftChanges(focusAreas, focusAreaDrafts),
+    [focusAreas, focusAreaDrafts],
   )
 
   const pushLiveNotification = useEffectEvent((notification: Omit<LiveNotification, 'id'>) => {
@@ -284,7 +313,7 @@ function App() {
     }
   })
 
-  const loadPlaytime = useEffectEvent(async (showSpinner = true) => {
+  async function loadPlaytimeNow(showSpinner = true) {
     if (showSpinner) {
       setIsLoading(true)
     }
@@ -304,9 +333,13 @@ function App() {
         setIsLoading(false)
       }
     }
+  }
+
+  const loadPlaytime = useEffectEvent(async (showSpinner = true) => {
+    await loadPlaytimeNow(showSpinner)
   })
 
-  const loadSettings = useEffectEvent(async () => {
+  async function loadSettingsNow() {
     try {
       const nextSettings = await invoke<UserSettings>('get_app_settings')
       setSettings(nextSettings)
@@ -314,9 +347,9 @@ function App() {
     } catch (error) {
       setSettingsSaveMessage(`Failed to load settings: ${String(error)}`)
     }
-  })
+  }
 
-  const loadTrackingWorkspace = useEffectEvent(async () => {
+  async function loadTrackingWorkspaceNow() {
     try {
       const [nextOverview, nextPlaylists, nextTrackedScenarios] = await Promise.all([
         invoke<StatsOverview>('get_tracked_stats_overview'),
@@ -334,10 +367,18 @@ function App() {
     } catch (error) {
       console.error('Failed to load tracking workspace', error)
     }
+  }
+
+  const loadTrackingWorkspace = useEffectEvent(async () => {
+    await loadTrackingWorkspaceNow()
   })
 
+  async function refreshWorkspaceNow(showSpinner = true) {
+    await Promise.all([loadPlaytimeNow(showSpinner), loadTrackingWorkspaceNow(), loadSettingsNow()])
+  }
+
   const refreshWorkspace = useEffectEvent(async (showSpinner = true) => {
-    await Promise.all([loadPlaytime(showSpinner), loadTrackingWorkspace(), loadSettings()])
+    await refreshWorkspaceNow(showSpinner)
   })
 
   function resetAvailableUpdate(nextUpdate: Update | null) {
@@ -362,46 +403,54 @@ function App() {
     }
   }
 
-  const runUpdateCheck = useEffectEvent(
-    async ({ showNoUpdateMessage, showErrors }: { showNoUpdateMessage: boolean; showErrors: boolean }) => {
-      if (isCheckingForUpdates || isInstallingUpdate) {
+  async function runUpdateCheckNow({
+    showNoUpdateMessage,
+    showErrors,
+  }: {
+    showNoUpdateMessage: boolean
+    showErrors: boolean
+  }) {
+    if (isCheckingForUpdates || isInstallingUpdate) {
+      return
+    }
+
+    setIsCheckingForUpdates(true)
+    if (showNoUpdateMessage) {
+      setUpdateStatusMessage('')
+      setUpdateStatusTone('neutral')
+    }
+
+    try {
+      const pendingUpdate = await check()
+      if (!pendingUpdate) {
+        resetAvailableUpdate(null)
+        if (showNoUpdateMessage) {
+          setUpdateStatusMessage(UP_TO_DATE_MESSAGE)
+          setUpdateStatusTone('neutral')
+        }
         return
       }
 
-      setIsCheckingForUpdates(true)
-      if (showNoUpdateMessage) {
-        setUpdateStatusMessage('')
-        setUpdateStatusTone('neutral')
+      resetAvailableUpdate(pendingUpdate)
+      setUpdateStatusMessage('')
+      setUpdateStatusTone('neutral')
+    } catch (error) {
+      if (showErrors) {
+        setUpdateStatusMessage(`Failed to check for updates: ${String(error)}`)
+        setUpdateStatusTone('error')
+      } else {
+        console.error('Automatic update check failed', error)
       }
+    } finally {
+      setIsCheckingForUpdates(false)
+    }
+  }
 
-      try {
-        const pendingUpdate = await check()
-        if (!pendingUpdate) {
-          resetAvailableUpdate(null)
-          if (showNoUpdateMessage) {
-            setUpdateStatusMessage(UP_TO_DATE_MESSAGE)
-            setUpdateStatusTone('neutral')
-          }
-          return
-        }
+  const runUpdateCheck = useEffectEvent(async (options: { showNoUpdateMessage: boolean; showErrors: boolean }) => {
+    await runUpdateCheckNow(options)
+  })
 
-        resetAvailableUpdate(pendingUpdate)
-        setUpdateStatusMessage('')
-        setUpdateStatusTone('neutral')
-      } catch (error) {
-        if (showErrors) {
-          setUpdateStatusMessage(`Failed to check for updates: ${String(error)}`)
-          setUpdateStatusTone('error')
-        } else {
-          console.error('Automatic update check failed', error)
-        }
-      } finally {
-        setIsCheckingForUpdates(false)
-      }
-    },
-  )
-
-  const installAvailableUpdate = useEffectEvent(async () => {
+  async function installAvailableUpdateNow() {
     const pendingUpdate = availableUpdateRef.current
     if (!pendingUpdate || isInstallingUpdate) {
       return
@@ -444,19 +493,11 @@ function App() {
     } finally {
       setIsInstallingUpdate(false)
     }
-  })
+  }
 
   useEffect(() => {
     window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(uiState))
   }, [uiState])
-
-  useEffect(() => {
-    window.localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals))
-  }, [goals])
-
-  useEffect(() => {
-    window.localStorage.setItem(FOCUS_AREAS_STORAGE_KEY, JSON.stringify(focusAreas))
-  }, [focusAreas])
 
   useEffect(() => {
     void refreshWorkspace()
@@ -480,7 +521,7 @@ function App() {
       showNoUpdateMessage: false,
       showErrors: false,
     })
-  }, [runUpdateCheck, settings?.autoCheckUpdates])
+  }, [settings?.autoCheckUpdates])
 
   useEffect(() => {
     if (!settings) {
@@ -492,7 +533,7 @@ function App() {
     }, settings.refreshIntervalSeconds * 1000)
 
     return () => window.clearInterval(timer)
-  }, [loadPlaytime, settings])
+  }, [settings])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -500,7 +541,7 @@ function App() {
     }, LIVE_POLL_INTERVAL_MS)
 
     return () => window.clearInterval(timer)
-  }, [loadTrackingWorkspace])
+  }, [])
 
   useEffect(() => {
     if (!uiState.liveMilestonesEnabled || !('Notification' in window)) {
@@ -565,7 +606,7 @@ function App() {
         tone: 'improving',
       })
     }
-  }, [pushLiveNotification, summary, trackedOverview, uiState.liveMilestonesEnabled])
+  }, [summary, trackedOverview, uiState.liveMilestonesEnabled])
 
   useEffect(() => {
     const unlisten = listen('app://hidden-to-tray', () => {
@@ -579,7 +620,7 @@ function App() {
     return () => {
       void unlisten.then((cleanup) => cleanup())
     }
-  }, [pushLiveNotification])
+  }, [])
 
   useEffect(() => {
     if (!summary || summary.dailySummaries.length === 0) {
@@ -647,13 +688,29 @@ function App() {
   }
 
   function updateGoalTarget(goalId: TrainingGoal['id'], target: number) {
-    setGoals((current) =>
+    setGoalsSaveMessage('')
+    setGoalsSaveTone('neutral')
+    setGoalDrafts((current) =>
       current.map((goal) =>
         goal.id === goalId
           ? { ...goal, target: Math.max(1, Number.isFinite(target) ? Math.round(target) : goal.target) }
           : goal,
       ),
     )
+  }
+
+  function handleSaveGoals() {
+    const nextGoals = finalizeTrainingGoalDraft(goalDrafts)
+    try {
+      writeStoredGoals(nextGoals)
+      setGoals(nextGoals)
+      setGoalDrafts(createTrainingGoalDraft(nextGoals))
+      setGoalsSaveMessage('Goals saved. Today and Analysis now use the new targets.')
+      setGoalsSaveTone('neutral')
+    } catch (error) {
+      setGoalsSaveMessage(`Failed to save goals: ${String(error)}`)
+      setGoalsSaveTone('error')
+    }
   }
 
   async function handleSaveSettings() {
@@ -699,7 +756,7 @@ function App() {
       scenario_paths: scenarioPaths,
     })
     setPlaylistRecords(nextPlaylists)
-    await loadTrackingWorkspace()
+    await loadTrackingWorkspaceNow()
   }
 
   function handleCreateFocusArea(label: string) {
@@ -713,7 +770,9 @@ function App() {
       label: normalized,
       scenarioNames: [],
     }
-    setFocusAreas((current) => [...current, nextFocusArea])
+    setFocusAreasSaveMessage('')
+    setFocusAreasSaveTone('neutral')
+    setFocusAreaDrafts((current) => [...current, nextFocusArea])
     setUiState((current) => ({
       ...current,
       selectedFocusAreaId: nextFocusArea.id,
@@ -721,7 +780,9 @@ function App() {
   }
 
   function handleDeleteFocusArea(focusAreaId: string) {
-    setFocusAreas((current) => current.filter((focusArea) => focusArea.id !== focusAreaId))
+    setFocusAreasSaveMessage('')
+    setFocusAreasSaveTone('neutral')
+    setFocusAreaDrafts((current) => current.filter((focusArea) => focusArea.id !== focusAreaId))
     setUiState((current) => ({
       ...current,
       selectedFocusAreaId:
@@ -730,7 +791,9 @@ function App() {
   }
 
   function handleToggleFocusAreaScenario(focusAreaId: string, scenarioName: string) {
-    setFocusAreas((current) =>
+    setFocusAreasSaveMessage('')
+    setFocusAreasSaveTone('neutral')
+    setFocusAreaDrafts((current) =>
       current.map((focusArea) =>
         focusArea.id !== focusAreaId
           ? focusArea
@@ -744,14 +807,19 @@ function App() {
     )
   }
 
-  const headerSubtitle =
-    uiState.activeView === 'today'
-      ? 'Daily coaching, live status, and session recap.'
-      : uiState.activeView === 'analysis'
-        ? 'Trend drill-down, calendar review, and scenario explorer.'
-        : uiState.activeView === 'practice'
-          ? 'Live session companion, goals, presets, and playlist mapping.'
-          : 'Local settings, tracker diagnostics, and update behavior.'
+  function handleSaveFocusAreas() {
+    const nextFocusAreas = finalizeFocusAreaDraft(focusAreaDrafts)
+    try {
+      writeStoredFocusAreas(nextFocusAreas)
+      setFocusAreas(nextFocusAreas)
+      setFocusAreaDrafts(createFocusAreaDraft(nextFocusAreas))
+      setFocusAreasSaveMessage('Focus areas saved. Analysis and Today now reflect the updated buckets.')
+      setFocusAreasSaveTone('neutral')
+    } catch (error) {
+      setFocusAreasSaveMessage(`Failed to save focus areas: ${String(error)}`)
+      setFocusAreasSaveTone('error')
+    }
+  }
 
   return (
     <main className="app-shell">
@@ -760,29 +828,12 @@ function App() {
           <div>
             <p className="eyebrow app-eyebrow">KovaaK Stats</p>
             <h1 className="app-title">Offline Aim Coach</h1>
-            <p className="subtle">{headerSubtitle}</p>
             <p className="subtle">{formatRefreshTimestamp(lastRefreshAt)}</p>
           </div>
 
           <div className="header-actions">
-            <button className="btn" onClick={() => void refreshWorkspace()} disabled={isLoading} type="button">
+            <button className="btn" onClick={() => void refreshWorkspaceNow()} disabled={isLoading} type="button">
               {isLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={() =>
-                void runUpdateCheck({
-                  showNoUpdateMessage: true,
-                  showErrors: true,
-                })
-              }
-              disabled={isCheckingForUpdates || isInstallingUpdate}
-              type="button"
-            >
-              {isInstallingUpdate ? 'Installing update...' : isCheckingForUpdates ? 'Checking updates...' : 'Check for updates'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => void handleQuit()} type="button">
-              Quit App
             </button>
           </div>
         </div>
@@ -800,7 +851,7 @@ function App() {
               </div>
 
               <div className="update-banner-actions">
-                <button className="btn" onClick={() => void installAvailableUpdate()} disabled={isInstallingUpdate} type="button">
+                <button className="btn" onClick={() => void installAvailableUpdateNow()} disabled={isInstallingUpdate} type="button">
                   {isInstallingUpdate ? 'Installing...' : 'Install update'}
                 </button>
                 <button className="btn btn-secondary" onClick={handleDismissUpdate} disabled={isInstallingUpdate} type="button">
@@ -851,19 +902,13 @@ function App() {
         </aside>
       ) : null}
 
-      <section className="content-frame" aria-live="polite">
+      <section className="content-frame">
         {uiState.activeView === 'today' ? (
           <TodayView
             summary={summary}
             trackedOverview={trackedOverview}
             settings={settings}
-            selectedDay={dashboardModel.selectedDay}
-            sessionRecap={sessionRecap}
-            goalProgress={goalProgress}
             readinessSummary={readinessSummary}
-            personalBestTimeline={personalBestTimeline}
-            focusPresets={FOCUS_PRESETS}
-            activeFocusPreset={uiState.activeFocusPreset}
             statusMessage={statusMessage}
             onOpenPractice={() => setUiState((current) => ({ ...current, activeView: 'practice' }))}
             onOpenAnalysis={() => setUiState((current) => ({ ...current, activeView: 'analysis' }))}
@@ -889,6 +934,7 @@ function App() {
             filteredPlaylists={breakdownsModel.filteredPlaylists}
             filteredScenarios={breakdownsModel.visibleScenarios}
             selectedScenario={breakdownsModel.selectedScenario}
+            selectedScenarioIsVisible={breakdownsModel.selectedScenarioIsVisible}
             hasCalendarRange={dashboardModel.hasCalendarRange}
             activeMonthKey={dashboardModel.activeMonthKey}
             canGoPrevious={dashboardModel.canGoPrevious}
@@ -918,18 +964,25 @@ function App() {
             selectedFocusAreaId={uiState.selectedFocusAreaId}
             planDurationMinutes={uiState.planDurationMinutes}
             presetScenarios={presetScenarios}
-            focusAreas={focusAreas}
-            focusAreaSummaries={focusAreaSummaries}
-            readinessSummary={readinessSummary}
-            trainingPlan={trainingPlan}
-            goals={goals}
-            goalProgress={goalProgress}
+            focusAreas={focusAreaDrafts}
+            focusAreaSummaries={practiceFocusAreaSummaries}
+            readinessSummary={practiceReadinessSummary}
+            trainingPlan={practiceTrainingPlan}
+            goals={goalDrafts}
+            goalProgress={practiceGoalProgress}
             playlistRecords={playlistRecords}
             trackedScenarios={trackedScenarios}
             selectedPlaylistId={uiState.selectedPlaylistId}
             trackedScenarioQuery={uiState.trackedScenarioQuery}
+            isGoalsDirty={isGoalsDirty}
+            goalsSaveMessage={goalsSaveMessage}
+            goalsSaveTone={goalsSaveTone}
+            isFocusAreasDirty={isFocusAreasDirty}
+            focusAreasSaveMessage={focusAreasSaveMessage}
+            focusAreasSaveTone={focusAreasSaveTone}
             onActivateFocusPreset={applyFocusPreset}
             onGoalTargetChange={updateGoalTarget}
+            onSaveGoals={handleSaveGoals}
             onSelectFocusArea={(focusAreaId) => setUiState((current) => ({ ...current, selectedFocusAreaId: focusAreaId }))}
             onPlanDurationChange={(planDurationMinutes) =>
               setUiState((current) => ({
@@ -946,6 +999,7 @@ function App() {
             onCreateFocusArea={handleCreateFocusArea}
             onDeleteFocusArea={handleDeleteFocusArea}
             onToggleFocusAreaScenario={handleToggleFocusAreaScenario}
+            onSaveFocusAreas={handleSaveFocusAreas}
             onSelectPlaylist={(playlistId) => setUiState((current) => ({ ...current, selectedPlaylistId: playlistId }))}
             onTrackedScenarioQueryChange={(value) =>
               setUiState((current) => ({
@@ -962,12 +1016,14 @@ function App() {
           <SettingsView
             settings={settings}
             draft={settingsDraft}
+            summary={summary}
             trackedOverview={trackedOverview}
             isSaving={isSavingSettings}
             saveMessage={settingsSaveMessage}
             liveMilestonesEnabled={uiState.liveMilestonesEnabled}
             onChange={setSettingsDraft}
             onSave={() => void handleSaveSettings()}
+            onQuit={() => void handleQuit()}
             onToggleLiveMilestones={(enabled) =>
               setUiState((current) => ({
                 ...current,
@@ -975,7 +1031,7 @@ function App() {
               }))
             }
             onCheckForUpdates={() =>
-              void runUpdateCheck({
+              void runUpdateCheckNow({
                 showNoUpdateMessage: true,
                 showErrors: true,
               })

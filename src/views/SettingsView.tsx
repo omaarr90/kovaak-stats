@@ -2,17 +2,19 @@ import EmptyState from '../components/primitives/EmptyState'
 import PanelCard from '../components/primitives/PanelCard'
 import SectionHeader from '../components/primitives/SectionHeader'
 import { formatTimestamp } from '../playtime-utils'
-import { type StatsOverview, type UserSettings } from '../types'
+import { type PlaytimeSummary, type StatsOverview, type UserSettings } from '../types'
 
 type SettingsViewProps = {
   settings: UserSettings | null
   draft: UserSettings | null
+  summary: PlaytimeSummary | null
   trackedOverview: StatsOverview | null
   isSaving: boolean
   saveMessage: string
   liveMilestonesEnabled: boolean
   onChange: (next: UserSettings) => void
   onSave: () => void
+  onQuit: () => void
   onToggleLiveMilestones: (enabled: boolean) => void
   onCheckForUpdates: () => void
 }
@@ -20,12 +22,14 @@ type SettingsViewProps = {
 function SettingsView({
   settings,
   draft,
+  summary,
   trackedOverview,
   isSaving,
   saveMessage,
   liveMilestonesEnabled,
   onChange,
   onSave,
+  onQuit,
   onToggleLiveMilestones,
   onCheckForUpdates,
 }: SettingsViewProps) {
@@ -134,6 +138,9 @@ function SettingsView({
               <button className="btn btn-secondary" type="button" onClick={onCheckForUpdates}>
                 Check for updates
               </button>
+              <button className="btn btn-secondary" type="button" onClick={onQuit}>
+                Quit app
+              </button>
             </div>
 
             {saveMessage ? <p className="header-status">{saveMessage}</p> : null}
@@ -146,6 +153,10 @@ function SettingsView({
             description="Use this panel to verify what the live tracker can currently see on disk and in the running process list."
           />
           <dl className="key-value-list">
+            <div>
+              <dt className="label">Historical stats folder</dt>
+              <dd className="mono">{summary?.sourcePath || 'Unavailable'}</dd>
+            </div>
             <div>
               <dt className="label">Detected session path</dt>
               <dd className="mono">{trackedOverview?.diagnostics.sessionPath || 'Unavailable'}</dd>

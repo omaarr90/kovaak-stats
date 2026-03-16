@@ -18,9 +18,10 @@ describe('buildBreakdownsViewModel', () => {
 
     expect(model.visibleScenarios.map((scenario) => scenario.scenarioName)).toEqual(['Declining Close'])
     expect(model.selectedScenario?.scenarioName).toBe('Declining Close')
+    expect(model.selectedScenarioIsVisible).toBe(true)
   })
 
-  it('falls back to the first visible scenario when the selected one is filtered out', () => {
+  it('preserves the selected scenario when filters hide it from the table', () => {
     const summary = buildSummary()
 
     const model = buildBreakdownsViewModel(summary, {
@@ -35,7 +36,30 @@ describe('buildBreakdownsViewModel', () => {
 
     expect(model.filteredPlaylists.map((playlist) => playlist.name)).toEqual(['Voltaic Fundamentals'])
     expect(model.visibleScenarios.map((scenario) => scenario.scenarioName)).toEqual(['Switch Active'])
-    expect(model.selectedScenario?.scenarioName).toBe('Switch Active')
+    expect(model.selectedScenario?.scenarioName).toBe('Declining Close')
+    expect(model.selectedScenarioIsVisible).toBe(false)
+  })
+
+  it('falls back to the first visible scenario when the selected one is no longer present after refresh', () => {
+    const summary = buildSummary()
+
+    const model = buildBreakdownsViewModel(summary, {
+      playlistQuery: '',
+      scenarioQuery: '',
+      trendFilter: 'all',
+      volumeFilter: 'all',
+      recencyFilter: 'all',
+      sortField: 'totalSeconds',
+      selectedScenarioName: 'Missing Scenario',
+    })
+
+    expect(model.visibleScenarios.map((scenario) => scenario.scenarioName)).toEqual([
+      'Dormant Static',
+      'Declining Close',
+      'Switch Active',
+    ])
+    expect(model.selectedScenario?.scenarioName).toBe('Dormant Static')
+    expect(model.selectedScenarioIsVisible).toBe(true)
   })
 })
 

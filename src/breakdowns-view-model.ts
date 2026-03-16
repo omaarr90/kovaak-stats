@@ -22,6 +22,7 @@ export type BreakdownsViewModel = {
   filteredPlaylists: PlaylistPlaytime[]
   visibleScenarios: ScenarioAnalytics[]
   selectedScenario: ScenarioAnalytics | null
+  selectedScenarioIsVisible: boolean
 }
 
 export function buildBreakdownsViewModel(
@@ -33,6 +34,7 @@ export function buildBreakdownsViewModel(
       filteredPlaylists: [],
       visibleScenarios: [],
       selectedScenario: null,
+      selectedScenarioIsVisible: false,
     }
   }
 
@@ -47,15 +49,18 @@ export function buildBreakdownsViewModel(
     .filter((scenario) => matchesVolumeFilter(scenario, filters.volumeFilter))
     .filter((scenario) => matchesRecencyFilter(scenario, filters.recencyFilter))
     .sort((left, right) => compareScenarios(left, right, filters.sortField))
-  const selectedScenario =
-    visibleScenarios.find((scenario) => scenario.scenarioName === filters.selectedScenarioName) ??
-    visibleScenarios[0] ??
-    null
+  const selectedScenarioFromSummary =
+    summary.scenarioAnalytics.find((scenario) => scenario.scenarioName === filters.selectedScenarioName) ?? null
+  const selectedScenario = selectedScenarioFromSummary ?? visibleScenarios[0] ?? null
+  const selectedScenarioIsVisible =
+    selectedScenario !== null &&
+    visibleScenarios.some((scenario) => scenario.scenarioName === selectedScenario.scenarioName)
 
   return {
     filteredPlaylists,
     visibleScenarios,
     selectedScenario,
+    selectedScenarioIsVisible,
   }
 }
 
