@@ -119,9 +119,9 @@ function PracticeView({
   const selectedPlaylist = playlistRecords.find((playlist) => playlist.id === selectedPlaylistId) ?? playlistRecords[0] ?? null
   const selectedFocusArea = focusAreas.find((focusArea) => focusArea.id === selectedFocusAreaId) ?? null
   const goalsStatusText =
-    goalsSaveMessage || (isGoalsDirty ? 'Unsaved changes. Save to update Today and Analysis.' : '')
+    goalsSaveMessage || (isGoalsDirty ? 'Unsaved changes. Save to update Overview and Analysis.' : '')
   const focusAreasStatusText =
-    focusAreasSaveMessage || (isFocusAreasDirty ? 'Unsaved changes. Save to update Today and Analysis.' : '')
+    focusAreasSaveMessage || (isFocusAreasDirty ? 'Unsaved changes. Save to update Overview and Analysis.' : '')
 
   useEffect(() => {
     setDraftScenarioPaths(selectedPlaylist?.scenarioPaths ?? [])

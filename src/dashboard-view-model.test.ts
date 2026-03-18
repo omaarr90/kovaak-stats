@@ -59,6 +59,57 @@ describe('createDashboardViewModel', () => {
     expect(model.activeMonthKey).toBe(toDateKey(end).slice(0, 7))
     expect(model.effectiveSelectedDateKey).toBe(toDateKey(start))
   })
+
+  it('preserves the selected calendar day across refreshes when it remains in range', () => {
+    const today = new Date()
+    const threeDaysAgo = new Date(today)
+    threeDaysAgo.setDate(today.getDate() - 3)
+    const yesterday = new Date(today)
+    yesterday.setDate(today.getDate() - 1)
+    const selectedEmptyDay = new Date(today)
+    selectedEmptyDay.setDate(today.getDate() - 2)
+    const selectedDateKey = toDateKey(selectedEmptyDay)
+
+    const initialSummary = buildSummary([
+      {
+        dateKey: toDateKey(threeDaysAgo),
+        totalSeconds: 900,
+        attemptCount: 3,
+        playlists: [],
+        scenarios: [],
+      },
+      {
+        dateKey: toDateKey(yesterday),
+        totalSeconds: 1200,
+        attemptCount: 4,
+        playlists: [],
+        scenarios: [],
+      },
+    ])
+
+    const refreshedSummary = buildSummary([
+      ...initialSummary.dailySummaries,
+      {
+        dateKey: toDateKey(today),
+        totalSeconds: 1800,
+        attemptCount: 6,
+        playlists: [],
+        scenarios: [],
+      },
+    ])
+
+    const initialModel = createDashboardViewModel(initialSummary, toDateKey(today).slice(0, 7), selectedDateKey)
+    const refreshedModel = createDashboardViewModel(
+      refreshedSummary,
+      initialModel.activeMonthKey,
+      initialModel.effectiveSelectedDateKey,
+    )
+
+    expect(initialModel.effectiveSelectedDateKey).toBe(selectedDateKey)
+    expect(initialModel.selectedDay.totalSeconds).toBe(0)
+    expect(refreshedModel.effectiveSelectedDateKey).toBe(selectedDateKey)
+    expect(refreshedModel.selectedDay.totalSeconds).toBe(0)
+  })
 })
 
 function buildSummary(dailySummaries: PlaytimeSummary['dailySummaries']): PlaytimeSummary {

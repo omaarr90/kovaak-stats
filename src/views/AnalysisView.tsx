@@ -166,7 +166,7 @@ function AnalysisView({
   const monthlyTotals = buildMonthlyTotals(summary.dailySummaries)
   const weekdayInsights = buildWeekdayInsights(summary)
   const neglectedCount = summary.scenarioAnalytics.filter((scenario) => !scenario.lastPlayedAt || daysSince(scenario.lastPlayedAt) > 30).length
-  const bestDay = [...summary.dailySummaries].sort((left, right) => right.totalSeconds - left.totalSeconds)[0]
+  const selectedPresetLabel = FOCUS_PRESETS.find((preset) => preset.id === activeFocusPreset)?.label ?? 'Custom'
 
   const playlistColumns: DataTableColumn<PlaytimeSummary['playlists'][number]>[] = [
     {
@@ -252,8 +252,8 @@ function AnalysisView({
       <PanelCard>
         <SectionHeader
           eyebrow="Analysis"
-          title="Training history, calendar, and scenario explorer"
-          description="Use the preset cards to drive filters, then inspect a scenario in the side panel."
+          title="Scenario explorer, rotation signals, and deep drill-downs"
+          description="Use the preset cards to drive filters, then inspect a scenario in the side panel without losing focus."
         />
 
         <div className="preset-grid">
@@ -274,10 +274,10 @@ function AnalysisView({
         </div>
 
         <div className="chip-grid">
-          <MetricChip label="Selected preset" value={FOCUS_PRESETS.find((preset) => preset.id === activeFocusPreset)?.label ?? 'Custom'} />
+          <MetricChip label="Selected preset" value={selectedPresetLabel} />
           <MetricChip label="Neglected scenarios" value={neglectedCount} tone="declining" />
-          <MetricChip label="Best day" value={bestDay ? formatDateLabel(bestDay.dateKey) : '--'} />
-          <MetricChip label="Best session" value={bestDay ? formatDuration(bestDay.totalSeconds) : '--'} />
+          <MetricChip label="Tracked scenarios" value={summary.scenarioAnalytics.length} />
+          <MetricChip label="Focus areas" value={focusAreaSummaries.length} />
         </div>
       </PanelCard>
 

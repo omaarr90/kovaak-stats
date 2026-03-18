@@ -24,6 +24,7 @@ import {
   getPresetFilters,
   getScenariosForPreset,
 } from './training-insights'
+import { INITIAL_UI_STATE, normalizeStoredUiState } from './ui-state'
 import {
   createFocusAreaDraft,
   createTrainingGoalDraft,
@@ -45,12 +46,12 @@ import {
   type UserSettings,
 } from './types'
 import AnalysisView from './views/AnalysisView'
+import OverviewView from './views/OverviewView'
 import PracticeView from './views/PracticeView'
 import SettingsView from './views/SettingsView'
-import TodayView from './views/TodayView'
 
 const VIEW_OPTIONS: { id: AppDashboardView; label: string }[] = [
-  { id: 'today', label: 'Today' },
+  { id: 'overview', label: 'Overview' },
   { id: 'analysis', label: 'Analysis' },
   { id: 'practice', label: 'Practice' },
   { id: 'settings', label: 'Settings' },
@@ -60,25 +61,6 @@ const UI_STORAGE_KEY = 'kovaak-stats-ui-v2'
 const GOALS_STORAGE_KEY = 'kovaak-stats-goals-v1'
 const FOCUS_AREAS_STORAGE_KEY = 'kovaak-stats-focus-areas-v1'
 const LIVE_POLL_INTERVAL_MS = 5_000
-
-const INITIAL_UI_STATE: UIState = {
-  activeView: 'today',
-  playlistQuery: '',
-  scenarioQuery: '',
-  scenarioTrendFilter: 'declining',
-  scenarioVolumeFilter: 'all',
-  scenarioRecencyFilter: 'played30d',
-  scenarioSortField: 'deltaPct',
-  selectedScenarioName: null,
-  visibleMonthKey: null,
-  selectedDateKey: null,
-  activeFocusPreset: 'declining',
-  selectedFocusAreaId: null,
-  planDurationMinutes: 20,
-  liveMilestonesEnabled: true,
-  selectedPlaylistId: null,
-  trackedScenarioQuery: '',
-}
 
 type AvailableUpdate = {
   currentVersion: string
@@ -101,11 +83,7 @@ function readStoredUiState(): UIState {
       return INITIAL_UI_STATE
     }
 
-    const parsed = JSON.parse(raw) as Partial<UIState>
-    return {
-      ...INITIAL_UI_STATE,
-      ...parsed,
-    }
+    return normalizeStoredUiState(JSON.parse(raw))
   } catch {
     return INITIAL_UI_STATE
   }
@@ -705,7 +683,7 @@ function App() {
       writeStoredGoals(nextGoals)
       setGoals(nextGoals)
       setGoalDrafts(createTrainingGoalDraft(nextGoals))
-      setGoalsSaveMessage('Goals saved. Today and Analysis now use the new targets.')
+      setGoalsSaveMessage('Goals saved. Overview and Analysis now use the new targets.')
       setGoalsSaveTone('neutral')
     } catch (error) {
       setGoalsSaveMessage(`Failed to save goals: ${String(error)}`)
@@ -813,7 +791,7 @@ function App() {
       writeStoredFocusAreas(nextFocusAreas)
       setFocusAreas(nextFocusAreas)
       setFocusAreaDrafts(createFocusAreaDraft(nextFocusAreas))
-      setFocusAreasSaveMessage('Focus areas saved. Analysis and Today now reflect the updated buckets.')
+      setFocusAreasSaveMessage('Focus areas saved. Analysis and Overview now reflect the updated buckets.')
       setFocusAreasSaveTone('neutral')
     } catch (error) {
       setFocusAreasSaveMessage(`Failed to save focus areas: ${String(error)}`)
@@ -827,7 +805,7 @@ function App() {
         <div className="header-main">
           <div>
             <p className="eyebrow app-eyebrow">KovaaK Stats</p>
-            <h1 className="app-title">Offline Aim Coach</h1>
+            <h1 className="app-title">KovaaK Activity Console</h1>
             <p className="subtle">{formatRefreshTimestamp(lastRefreshAt)}</p>
           </div>
 
@@ -903,17 +881,20 @@ function App() {
       ) : null}
 
       <section className="content-frame">
-        {uiState.activeView === 'today' ? (
-          <TodayView
+        {uiState.activeView === 'overview' ? (
+          <OverviewView
             summary={summary}
-            trackedOverview={trackedOverview}
-            settings={settings}
-            readinessSummary={readinessSummary}
             statusMessage={statusMessage}
-            onOpenPractice={() => setUiState((current) => ({ ...current, activeView: 'practice' }))}
-            onOpenAnalysis={() => setUiState((current) => ({ ...current, activeView: 'analysis' }))}
+            hasCalendarRange={dashboardModel.hasCalendarRange}
+            activeMonthKey={dashboardModel.activeMonthKey}
+            canGoPrevious={dashboardModel.canGoPrevious}
+            canGoNext={dashboardModel.canGoNext}
+            calendarCells={dashboardModel.calendarCells}
+            effectiveSelectedDateKey={dashboardModel.effectiveSelectedDateKey}
+            visibleMonthPeakSeconds={dashboardModel.visibleMonthPeakSeconds}
+            onMonthChange={handleMonthChange}
+            onSelectDate={(dateKey) => setUiState((current) => ({ ...current, selectedDateKey: dateKey }))}
             onOpenSettings={() => setUiState((current) => ({ ...current, activeView: 'settings' }))}
-            onActivateFocusPreset={applyFocusPreset}
           />
         ) : null}
 

@@ -148,7 +148,7 @@ export type CalendarCell =
 
 export type DashboardView = 'overview' | 'calendar' | 'breakdowns' | 'coach'
 
-export type AppDashboardView = 'today' | 'analysis' | 'practice' | 'settings'
+export type AppDashboardView = 'overview' | 'analysis' | 'practice' | 'settings'
 
 export type ScenarioTrendFilter = 'all' | 'improving' | 'flat' | 'declining' | 'insufficientData'
 export type ScenarioVolumeFilter = 'all' | 'active7d' | 'active30d' | 'quiet7d'
